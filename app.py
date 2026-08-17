@@ -25,14 +25,14 @@ def find_officecli() -> str:
     """尋找 officecli 二進位檔。"""
     candidates = [
         shutil.which("officecli"),
-        "/root/.local/bin/officecli",
         "/usr/local/bin/officecli",
+        "/root/.local/bin/officecli",
         "/home/app/.local/bin/officecli",
     ]
     for c in candidates:
         if c and os.path.isfile(c):
             return c
-    return "/root/.local/bin/officecli"
+    return "/usr/local/bin/officecli"
 
 
 def run_officecli(args: list, timeout: int = 60) -> dict:

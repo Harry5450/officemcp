@@ -11,10 +11,13 @@ RUN apt-get update && \
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
 RUN set -euxo pipefail && \
-    curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash ; \
-    echo "=== officecli location ===" && \
-    (find / -name officecli -type f 2>/dev/null || true) && \
-    echo "=== HOME=$HOME ==="
+    curl -fsSL -o /usr/local/bin/officecli \
+        https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-linux-x64 && \
+    chmod +x /usr/local/bin/officecli && \
+    test -x /usr/local/bin/officecli && \
+    /usr/local/bin/officecli --version
+
+ENV PATH="/usr/local/bin:${PATH}"
 
 WORKDIR /app
 
