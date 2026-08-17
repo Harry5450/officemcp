@@ -93,6 +93,16 @@ def list_files():
     return {"ok": True, "files": files}
 
 
+@app.get("/diag-files")
+def diag_files():
+    """診斷：回傳實際檔名與 UTF-8 hex。"""
+    out = []
+    for f in WORK_DIR.iterdir():
+        if f.is_file():
+            out.append({"name": f.name, "hex": f.name.encode("utf-8").hex()})
+    return {"ok": True, "files": out}
+
+
 @app.get("/download/{filename}")
 def download(filename: str):
     """下載伺服器上的檔案。"""
