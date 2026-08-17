@@ -109,8 +109,11 @@ HELP = """OfficeCLI Line Bot
 
 
 def verify_line_signature(raw_body: bytes, signature: str) -> bool:
-    """驗證 Line webhook 請求簽名（HMAC-SHA256 with channel secret）。"""
-    if not LINE_SECRET or not signature:
+    """驗證 Line webhook 請求簽名（HMAC-SHA256 with channel secret）。
+    未設定 LINE_SECRET 時跳過驗證，方便初次串接測試。"""
+    if not LINE_SECRET:
+        return True
+    if not signature:
         return False
     expected = hmac.new(LINE_SECRET.encode(), raw_body, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(expected).decode(), signature)
