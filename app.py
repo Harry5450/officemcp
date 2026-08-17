@@ -3,6 +3,9 @@ import subprocess
 import shutil
 import json
 import logging
+import hashlib
+import hmac
+import base64
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -12,6 +15,7 @@ import httpx
 # 環境變數
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 WORK_DIR = Path("/app/output")
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -104,9 +108,22 @@ HELP = """OfficeCLI Line Bot
 """
 
 
+def verify_line_signature(raw_body: bytes, signature: str) -> bool:
+    """驗證 Line webhook 請求簽名（HMAC-SHA256 with channel secret）。"""
+    if not LINE_SECRET or not signature:
+        return False
+    expected = hmac.new(LINE_SECRET.encode(), raw_body, hashlib.sha256).digest()
+    return hmac.compare_digest(base64.b64encode(expected).decode(), signature)
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
-    body = await request.json()
+    raw = await request.body()
+    signature = request.headers.get("x-line-signature", "")
+    if not verify_line_signature(raw, signature):
+        return JSONResponse(status_code=403, content={"error": "invalid signature"})
+
+    body = json.loads(raw.decode("utf-8"))
     for event in body.get("events", []):
         if event.get("type") != "message" or event["message"]["type"] != "text":
             continue
