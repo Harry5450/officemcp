@@ -10,7 +10,10 @@ RUN apt-get update && \
 
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
-RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
+RUN set -euxo pipefail && \
+    curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash && \
+    test -x /root/.local/bin/officecli && \
+    /root/.local/bin/officecli --version
 
 WORKDIR /app
 

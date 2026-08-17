@@ -21,11 +21,25 @@ logger = logging.getLogger("app")
 app = FastAPI()
 
 
+def find_officecli() -> str:
+    """尋找 officecli 二進位檔。"""
+    candidates = [
+        shutil.which("officecli"),
+        "/root/.local/bin/officecli",
+        "/usr/local/bin/officecli",
+        "/home/app/.local/bin/officecli",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return "/root/.local/bin/officecli"
+
+
 def run_officecli(args: list, timeout: int = 60) -> dict:
     """執行 officecli 指令。"""
-    oc = shutil.which("officecli") or "/root/.local/bin/officecli"
+    oc = find_officecli()
     cmd = [oc] + args
-    env = {**os.environ, "PATH": f"/root/.local/bin:{os.environ.get('PATH', '')}"}
+    env = {**os.environ, "PATH": f"{os.path.dirname(oc)}:{os.environ.get('PATH', '')}"}
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(WORK_DIR), env=env)
         return {"ok": r.returncode == 0, "out": r.stdout.strip(), "err": r.stderr.strip()}
