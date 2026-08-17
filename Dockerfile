@@ -1,7 +1,19 @@
 FROM python:3.11-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
+
 WORKDIR /app
-RUN pip install --no-cache-dir fastapi uvicorn httpx python-docx openpyxl python-pptx
+
+RUN pip install --no-cache-dir fastapi uvicorn
+
 COPY server.py .
+
 RUN mkdir -p /app/output
+
 EXPOSE 8080
+
 CMD ["python", "server.py"]
