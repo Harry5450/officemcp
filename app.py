@@ -150,6 +150,21 @@ async def webhook(request: Request):
     return {"status": "ok"}
 
 
+@app.get("/line-status")
+async def line_status():
+    """檢查 LINE bot 連線狀態。"""
+    if not LINE_TOKEN:
+        return {"ok": False, "error": "LINE_CHANNEL_ACCESS_TOKEN 未設定"}
+    async with httpx.AsyncClient() as c:
+        r = await c.get(
+            "https://api.line.me/v2/bot/info",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+        )
+        if r.status_code == 200:
+            return {"ok": True, "data": r.json()}
+        return {"ok": False, "http": r.status_code, "error": r.text[:300]}
+
+
 if __name__ == "__main__":
     logger.info("Starting on port %d", PORT)
     uvicorn.run(app, host="0.0.0.0", port=PORT)
