@@ -8,7 +8,7 @@ import hmac
 import base64
 from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import uvicorn
 import httpx
 
@@ -83,6 +83,26 @@ async def command(request: Request):
     return {"ok": r["ok"], "output": r["out"] or r["err"]}
 
 
+@app.get("/files")
+def list_files():
+    """列出已建立的 Office 檔案。"""
+    files = sorted(
+        [f.name for f in WORK_DIR.iterdir()
+         if f.is_file() and f.suffix.lower() in (".docx", ".xlsx", ".pptx", ".json", ".csv")]
+    )
+    return {"ok": True, "files": files}
+
+
+@app.get("/download/{filename}")
+def download(filename: str):
+    """下載伺服器上的檔案。"""
+    fsafe = Path(filename).name
+    path = WORK_DIR / fsafe
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={"ok": False, "error": "檔案不存在"})
+    return FileResponse(path, filename=fsafe)
+
+
 # --- Line Webhook ---
 
 async def reply_line(token: str, text: str):
@@ -96,14 +116,61 @@ async def reply_line(token: str, text: str):
         )
 
 
+def public_url(path: str) -> str:
+    """用 Zeabur 網域建立公開 URL。"""
+    domain = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
+    return f"{domain}{path}"
+
+
+async def reply_file(token: str, filename: str):
+    """透過 Line 回傳檔案訊息。"""
+    if not LINE_TOKEN:
+        return
+    fsafe = Path(filename).name
+    path = WORK_DIR / fsafe
+    if not path.is_file():
+        await reply_line(token, f"檔案不存在：{fsafe}")
+        return
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            "https://api.line.me/v2/bot/message/reply",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "replyToken": token,
+                "messages": [{
+                    "type": "file",
+                    "originalContentUrl": public_url(f"/download/{fsafe}"),
+                    "fileName": fsafe,
+                }]
+            }
+        )
+
+
+async def reply_text_multiple(token: str, texts: list):
+    if not LINE_TOKEN or not texts:
+        return
+    msgs = [{"type": "text", "text": t} for t in texts[:5]]
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            "https://api.line.me/v2/bot/message/reply",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+            json={"replyToken": token, "messages": msgs}
+        )
+
+
 HELP = """OfficeCLI Line Bot
 
 /create [檔名] - 建立文件
+/get [檔名] - 下載文件
+/list - 列出檔案
+/merge [模板] [輸出] [JSON] - 合併模板
 /cmd [指令] - 執行 officecli
 /help - 說明
 
 範例：
 /create report.docx
+/get report.docx
+/merge letter.docx out.docx {"name":"王小明"}
 /cmd add deck.pptx / --type slide --prop title="Hello"
 """
 
@@ -128,11 +195,31 @@ async def webhook(request: Request):
 
     body = json.loads(raw.decode("utf-8"))
     for event in body.get("events", []):
-        if event.get("type") != "message" or event["message"]["type"] != "text":
+        if event.get("type") != "message":
+            continue
+        token = event["replyToken"]
+
+        # 檔案上傳：下載 Line message content 存到 WORK_DIR
+        if event["message"]["type"] == "file":
+            msg_id = event["message"]["id"]
+            filename = event["message"].get("fileName", "upload.bin")
+            fsafe = Path(filename).name
+            async with httpx.AsyncClient() as c:
+                r = await c.get(
+                    f"https://api-data.line.me/v2/bot/message/{msg_id}/content",
+                    headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+                )
+                if r.status_code == 200:
+                    (WORK_DIR / fsafe).write_bytes(r.content)
+                    await reply_line(token, f"已接收並儲存：{fsafe}\n輸入 /list 查看或 /cmd 操作它")
+                else:
+                    await reply_line(token, f"下載檔案失敗：HTTP {r.status_code}")
+            continue
+
+        if event["message"]["type"] != "text":
             continue
 
         text = event["message"]["text"].strip()
-        token = event["replyToken"]
 
         if text in ["/help", "help"]:
             await reply_line(token, HELP)
@@ -140,6 +227,27 @@ async def webhook(request: Request):
             filename = text[8:].strip()
             r = run_officecli(["create", filename])
             await reply_line(token, f"已建立：{filename}" if r["ok"] else f"失敗：{r['err']}")
+        elif text.startswith("/get "):
+            filename = text[5:].strip()
+            await reply_file(token, filename)
+        elif text in ["/list", "list"]:
+            files = sorted([f.name for f in WORK_DIR.iterdir() if f.is_file()])
+            await reply_line(token, "目前檔案：\n" + ("\n".join(files) if files else "（沒有檔案）"))
+        elif text.startswith("/merge "):
+            parts = text[7:].split()
+            if len(parts) >= 3:
+                template, output = parts[0], parts[1]
+                data_json = " ".join(parts[2:])
+                data_file = None
+                # 若第三個參數是現有 JSON 檔路徑
+                cand = WORK_DIR / data_json
+                if cand.is_file():
+                    data_file = cand
+                args = ["merge", template, output, "--data", str(data_file) if data_file else data_json, "--force"]
+                r = run_officecli(args)
+                await reply_line(token, f"已合併：{output}" if r["ok"] else f"失敗：{r['err']}")
+            else:
+                await reply_line(token, "用法：/merge 模板 輸出 JSON\n範例：/merge letter.docx out.docx {\"name\":\"小明\"}")
         elif text.startswith("/cmd "):
             args = text[5:].strip().split()
             r = run_officecli(args)
