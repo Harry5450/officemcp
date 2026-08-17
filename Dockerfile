@@ -8,12 +8,12 @@ RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/instal
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir fastapi uvicorn
+RUN pip install --no-cache-dir fastapi uvicorn httpx
 
-COPY server.py .
+COPY app.py .
 
 RUN mkdir -p /app/output
 
 EXPOSE 8080
 
-CMD ["python", "server.py"]
+CMD ["python", "app.py"]
