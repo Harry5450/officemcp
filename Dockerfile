@@ -8,6 +8,8 @@ RUN apt-get update && \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
 RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
 
 WORKDIR /app
