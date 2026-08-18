@@ -86,7 +86,7 @@
 
 | 端點 | 用途 |
 |------|------|
-| `/health` | 狀態 + `boot` 時間戳 + git commit（驗證新版上線） |
+| `/health` | 狀態 + `boot` 時間戳 + git commit + LINE 設定布林值與 webhook 診斷計數（不回傳 token 或訊息內容） |
 | `/files` | 列出已建立檔案 |
 | `/diag-files` | 檔案 + UTF-8 hex |
 | `/templates` | 管理員查看目前 workspace 的個人／共用範本 |

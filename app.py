@@ -49,6 +49,14 @@ ACTIVE_IS_ADMIN: ContextVar[bool] = ContextVar("active_is_admin", default=False)
 EVENT_LOG: list = []
 EVENT_LOG_MAX = 50
 BOOT_TIME = int(time.time())
+WEBHOOK_STATUS = {
+    "requests": 0,
+    "signature_rejected": 0,
+    "events": 0,
+    "messages": 0,
+    "last_event_type": "",
+    "last_delivery": "",
+}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -222,7 +230,15 @@ def health():
         git = sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     except Exception:
         git = ""
-    return {"status": "ok", "version": "4", "boot": BOOT_TIME, "git": git}
+    return {
+        "status": "ok",
+        "version": "4",
+        "boot": BOOT_TIME,
+        "git": git,
+        "line_token_set": bool(LINE_TOKEN),
+        "line_secret_set": bool(LINE_SECRET),
+        "webhook": dict(WEBHOOK_STATUS),
+    }
 
 
 @app.post("/create")
@@ -304,6 +320,7 @@ async def send_line_message(token: str, messages: list):
     push 明確失敗時退回 reply（reply token 仍有效時可避免完全無回應）。
     """
     if not LINE_TOKEN:
+        WEBHOOK_STATUS["last_delivery"] = "line_token_missing"
         log_event("reply_error", "LINE_TOKEN 未設定")
         return
     target = ACTIVE_LINE_TARGET.get() or LINE_GROUP_ID or LINE_USER_ID
@@ -318,7 +335,9 @@ async def send_line_message(token: str, messages: list):
                     json={"replyToken": token, "messages": messages},
                 )
                 if r.status_code == 200:
+                    WEBHOOK_STATUS["last_delivery"] = "reply_ok"
                     return
+                WEBHOOK_STATUS["last_delivery"] = f"reply_http_{r.status_code}"
                 log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
                 if not target:
                     return
@@ -328,7 +347,10 @@ async def send_line_message(token: str, messages: list):
                     json={"to": target, "messages": messages},
                 )
                 if r.status_code != 200:
+                    WEBHOOK_STATUS["last_delivery"] = f"push_http_{r.status_code}"
                     log_event("push_error", f"HTTP {r.status_code}: {r.text[:200]}")
+                else:
+                    WEBHOOK_STATUS["last_delivery"] = "push_ok"
                 return
             if target:
                 r = await c.post(
@@ -337,7 +359,9 @@ async def send_line_message(token: str, messages: list):
                     json={"to": target, "messages": messages},
                 )
                 if r.status_code == 200:
+                    WEBHOOK_STATUS["last_delivery"] = "push_ok"
                     return
+                WEBHOOK_STATUS["last_delivery"] = f"push_http_{r.status_code}"
                 log_event("push_error", f"HTTP {r.status_code}: {r.text[:200]}")
                 if not token:
                     return
@@ -353,8 +377,12 @@ async def send_line_message(token: str, messages: list):
                     json={"replyToken": token, "messages": messages},
                 )
             if r.status_code != 200:
+                WEBHOOK_STATUS["last_delivery"] = f"reply_http_{r.status_code}"
                 log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
+            else:
+                WEBHOOK_STATUS["last_delivery"] = "reply_ok"
     except Exception as e:
+        WEBHOOK_STATUS["last_delivery"] = "exception"
         log_event("reply_error", f"{type(e).__name__}: {e}")
 
 
@@ -1104,13 +1132,18 @@ def debug_log(request: Request):
 
 @app.post("/webhook")
 async def webhook(request: Request):
+    WEBHOOK_STATUS["requests"] += 1
     raw = await request.body()
     signature = request.headers.get("x-line-signature", "")
     if not verify_line_signature(raw, signature):
+        WEBHOOK_STATUS["signature_rejected"] += 1
         return JSONResponse(status_code=403, content={"error": "invalid signature"})
 
     body = json.loads(raw.decode("utf-8"))
-    for event in body.get("events", []):
+    events = body.get("events", [])
+    WEBHOOK_STATUS["events"] += len(events)
+    for event in events:
+        WEBHOOK_STATUS["last_event_type"] = event.get("type", "")
         src = event.get("source", {})
         gid = src.get("groupId")
         rid = src.get("roomId")
@@ -1130,6 +1163,7 @@ async def webhook(request: Request):
             ACTIVE_IS_ADMIN.reset(admin_token)
             continue
         token = event["replyToken"]
+        WEBHOOK_STATUS["messages"] += 1
 
         # 檔案上傳：下載 Line message content 存到 WORK_DIR
         if event["message"]["type"] == "file":
