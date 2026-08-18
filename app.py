@@ -1,4 +1,5 @@
 import os
+import asyncio
 import subprocess
 import shutil
 import json
@@ -16,6 +17,7 @@ import httpx
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
@@ -122,15 +124,32 @@ def download(filename: str):
 
 # --- Line Webhook ---
 
-async def reply_line(token: str, text: str):
+async def send_line_message(token: str, messages: list):
+    """送出 Line 訊息。
+    優先使用 push API（無 5 秒限制、可用多次），
+    取得 userId 後一律用 push；否則退回 reply（5 秒內）。
+    """
     if not LINE_TOKEN:
         return
     async with httpx.AsyncClient() as c:
-        await c.post(
-            "https://api.line.me/v2/bot/message/reply",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-            json={"replyToken": token, "messages": [{"type": "text", "text": text}]}
-        )
+        if LINE_USER_ID:
+            r = await c.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+                json={"to": LINE_USER_ID, "messages": messages},
+            )
+        else:
+            r = await c.post(
+                "https://api.line.me/v2/bot/message/reply",
+                headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+                json={"replyToken": token, "messages": messages},
+            )
+    if r.status_code != 200:
+        log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
+
+
+async def reply_line(token: str, text: str):
+    await send_line_message(token, [{"type": "text", "text": text}])
 
 
 def public_url(path: str) -> str:
@@ -280,19 +299,11 @@ async def reply_file(token: str, filename: str):
         return
     import urllib.parse
     dl_url = public_url(f"/download/{urllib.parse.quote(fsafe)}")
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            "https://api.line.me/v2/bot/message/reply",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-            json={
-                "replyToken": token,
-                "messages": [{
-                    "type": "file",
-                    "originalContentUrl": dl_url,
-                    "fileName": fsafe,
-                }]
-            }
-        )
+    await send_line_message(token, [{
+        "type": "file",
+        "originalContentUrl": dl_url,
+        "fileName": fsafe,
+    }])
 
 
 def office_file_in_args(args: list) -> str | None:
@@ -324,24 +335,14 @@ async def reply_result(token: str, r: dict, ok_msg: str, args: list | None = Non
                 "originalContentUrl": public_url(f"/download/{urllib.parse.quote(fname)}"),
                 "fileName": Path(fname).name,
             })
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            "https://api.line.me/v2/bot/message/reply",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-            json={"replyToken": token, "messages": messages}
-        )
+    await send_line_message(token, messages)
 
 
 async def reply_text_multiple(token: str, texts: list):
     if not LINE_TOKEN or not texts:
         return
     msgs = [{"type": "text", "text": t} for t in texts[:5]]
-    async with httpx.AsyncClient() as c:
-        await c.post(
-            "https://api.line.me/v2/bot/message/reply",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-            json={"replyToken": token, "messages": msgs}
-        )
+    await send_line_message(token, msgs)
 
 
 HELP = """OfficeCLI Line Bot
@@ -441,6 +442,12 @@ async def webhook(request: Request):
 
     body = json.loads(raw.decode("utf-8"))
     for event in body.get("events", []):
+        # 記錄使用者 userId，之後用 push API 回覆（無 5 秒限制）
+        src = event.get("source", {})
+        uid = src.get("userId") or src.get("groupId") or src.get("roomId")
+        if uid:
+            global LINE_USER_ID
+            LINE_USER_ID = uid
         if event.get("type") != "message":
             continue
         token = event["replyToken"]
