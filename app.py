@@ -16,6 +16,9 @@ import httpx
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
 WORK_DIR = Path("/app/output")
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -128,8 +131,123 @@ async def reply_line(token: str, text: str):
 
 def public_url(path: str) -> str:
     """用 Zeabur 網域建立公開 URL。"""
-    domain = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
-    return f"{domain}{path}"
+    return f"{PUBLIC_BASE_URL}{path}"
+
+
+# --- 自然語言解析 ---
+
+def parse_rule(text: str) -> dict | None:
+    """規則式解析：從文字中抽取出 officecli 指令。傳回 None 表示無法解析。"""
+    import re
+    t = text.strip()
+    low = t.lower()
+
+    # 建立文件：請幫我建立 aaa.docx / 新增 bbb.xlsx 等
+    KEYS = {
+        "word": ".docx", "excel": ".xlsx", "powerpoint": ".pptx",
+        "簡報": ".pptx", "投影片": ".pptx", "試算表": ".xlsx",
+        "表格": ".xlsx", "文書": ".docx", "文件": ".docx", "doc": ".docx",
+        "word": ".docx", "spreadsheet": ".xlsx",
+    }
+    # 先找「建立...（類型）...檔名」或「建立...檔名」
+    m = re.search(r"(建立|新增|創建|製作|產生|生成|做|開|建)(?:一份|一個|個)?\s*"
+                  r"([a-zA-Z0-9_\-\u4e00-\u9fff]{1,80}\.(?:docx|xlsx|pptx))", text)
+    if not m:
+        # 「建立一份 Word 文件叫報告.docx」或「建立一份 Excel 叫銷售」
+        m = re.search(r"(建立|新增|創建|製作|產生|做|開|建).{0,16}?(word|excel|powerpoint|簡報|投影片|試算表|表格|文書|文件)"
+                      r".{0,6}?(?:叫|命名為|名為)\s*([a-zA-Z0-9_\-\u4e00-\u9fff]{1,40}(?:\.[a-z0-9]{2,5})?)", text, re.IGNORECASE)
+        if m and m.group(3):
+            ext = KEYS.get(m.group(2).lower(), ".docx")
+            fname = m.group(3)
+            if not re.search(r"\.\w+$", fname):
+                fname += ext
+            return {"action": "create", "args": ["create", fname]}
+        # 「建立一份 Word 文件」（未指定檔名，用類型當預設名）
+        m = re.search(r"(建立|新增|創建|製作|產生|做|開|建).{0,8}?(word|excel|powerpoint|簡報|投影片|試算表|表格|文書|文件)(?!.{0,8}\.(?:docx|xlsx|pptx))(?!.{0,4}叫)", text, re.IGNORECASE)
+        if m:
+            base = m.group(2).title()
+            return {"action": "create", "args": ["create", base + KEYS.get(m.group(2).lower(), ".docx")]}
+    if m:
+        return {"action": "create", "args": ["create", m.group(2)]}
+
+    # 「建立一份簡報 deck.pptx / 一份試算表 budget.xlsx」類型名+檔名
+    m = re.search(r"(建立|新增|創建|製作|產生|做|開|建).{0,6}?(簡報|投影片|試算表|表格|文書|word|excel|powerpoint|文件)"
+                  r".{0,4}?\s*([a-zA-Z0-9_\-\u4e00-\u9fff]{1,40}\.(?:docx|xlsx|pptx))", text, re.IGNORECASE)
+    if m:
+        return {"action": "create", "args": ["create", m.group(3)]}
+
+    # 建立文字檔
+    m = re.search(r"(建立|新增|創建|做|建)(一份)?\s*([a-zA-Z0-9_\-\u4e00-\u9fff]{1,80}\.(txt|csv|json))", text)
+    if m:
+        return {"action": "create_text", "args": ["create", m.group(3)]}
+
+    # 合併 / 套用模板
+    m = re.search(r"(合併|套用模板|merge|填)(模板|template)?\s*([a-zA-Z0-9_\-\u4e00-\u9fff]+\.(docx|xlsx|pptx))\s*(?:成|至|為|輸出|存為|到)?\s*([a-zA-Z0-9_\-\u4e00-\u9fff]+\.\w+)?", text, re.IGNORECASE)
+    if m:
+        tmpl = m.group(3)
+        out = m.group(5) or tmpl.replace(".", "_out.", 1)
+        return {"action": "merge_open", "args": ["merge", tmpl, out, "--data"]}
+
+    # 下載
+    m = re.search(r"(下載|拿|給我|傳|取)\s*([a-zA-Z0-9_\-\u4e00-\u9fff]+\.\w+)", text)
+    if m:
+        return {"action": "download", "args": [m.group(2)]}
+
+    # 列出檔案
+    if re.search(r"(列出|有哪些|看看|查看|有.*檔案|list|檔案列表)", low) and re.search(r"檔案|文件|files", low, re.IGNORECASE):
+        return {"action": "list", "args": []}
+
+    # 加文字到文件
+    m = re.search(r"([a-zA-Z0-9_\-\u4e00-\u9fff]+\.docx)\s*(?:裡|中)?\s*(?:請|幫我|麻煩|幫)?\s*(加|插入|新增|寫入|加入|加上|填)(?:入|上)?\s*(.{1,120}?)\s*$", text)
+    if m:
+        fname, content = m.group(1), m.group(3)
+        return {"action": "add_text", "args": ["add", fname, "/", "--type", "paragraph", "--prop", f"text={content}"]}
+
+    return None
+
+
+async def ask_llm(text: str, file_context: list) -> dict | None:
+    """呼叫 Gemini 將自然語言轉成 officecli 指令。失敗或無 key 時回傳 None。"""
+    if not GEMINI_KEY or GEMINI_KEY.startswith("AQ.A"):
+        return None
+    sys_prompt = (
+        "你是 officecli 指令轉換器。officecli 是操作 Office 文件的 CLI。"
+        "使用者的訊息可能是自然語言請求，請判斷使用者想要執行的動作，"
+        "並回覆一個 JSON 物件，格式為 {\"action\": \"create|add_text|merge|command|download|list\", "
+        "\"args\": [\"officecli 參數陣列\", ...]}。"
+        "只回覆 JSON，不要有任何額外文字。"
+        "可用動作與對應指令：\n"
+        "create: 建立檔案，args 形如 [\"create\", \"檔案.docx\"]\n"
+        "add_text: 在文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
+        "merge: 合併模板，args 形如 [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]\n"
+        "command: 其他 officecli 指令\n"
+        "download: 下載檔案，args 形如 [\"檔案.docx\"]\n"
+        "list: 列出檔案，args 為 []\n"
+    )
+    files_str = "，".join(file_context) if file_context else "（目前沒有檔案）"
+    user_prompt = f"使用者訊息：{text}\n伺服器上現有檔案：{files_str}\n請回覆動作 JSON。"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": sys_prompt}, {"text": user_prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(url, json=payload)
+            if r.status_code != 200:
+                logger.error("Gemini error %s: %s", r.status_code, r.text[:200])
+                return None
+            data = r.json()
+            out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # 去除可能的 ```json 包裝
+            out = out.strip("`")
+            if out.lower().startswith("json"):
+                out = out[4:].lstrip()
+            rj = json.loads(out)
+            return {"action": rj.get("action"), "args": rj.get("args", [])}
+    except Exception as e:
+        logger.warning("Gemini fallback failed: %s", e)
+        return None
 
 
 async def reply_file(token: str, filename: str):
@@ -194,6 +312,54 @@ def verify_line_signature(raw_body: bytes, signature: str) -> bool:
         return False
     expected = hmac.new(LINE_SECRET.encode(), raw_body, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(expected).decode(), signature)
+
+
+async def handle_natural_language(token: str, text: str, raw: str):
+    """規則式優先解析，失敗再由 LLM 判斷。"""
+    files_now = [f.name for f in WORK_DIR.iterdir() if f.is_file()]
+
+    # 第一步：規則式
+    plan = parse_rule(text)
+    if plan is None and GEMINI_KEY and not GEMINI_KEY.startswith("AQ.A"):
+        await reply_line(token, "我來理解你的需求…（使用 AI 判斷）")
+        plan = await ask_llm(text, files_now)
+
+    if plan is None:
+        await reply_line(token, "輸入 /help 查看指令，或直接告訴我你想要做什麼（例如「幫我建立 report.docx」）")
+        return
+
+    action = plan.get("action")
+    args = plan.get("args", [])
+
+    if action == "create":
+        r = run_officecli(["create", args[0]] if len(args) == 1 else args)
+        await reply_line(token, f"已建立：{args[0]}" if r["ok"] else f"失敗：{r['err']}")
+    elif action == "create_text":
+        fname = Path(args[0]).name
+        (WORK_DIR / fname).touch()
+        await reply_line(token, f"已建立：{fname}")
+    elif action == "add_text":
+        r = run_officecli(args)
+        await reply_line(token, f"已加入內容" if r["ok"] else f"失敗：{r['err']}")
+    elif action in ("merge", "merge_open"):
+        # merge_open 尚未帶 data，提示需要資料
+        if action == "merge_open":
+            await reply_line(token, "請補上資料 JSON，例如：/merge letter.docx out.docx {\"name\":\"小明\"}")
+            return
+        temp, out = args[0], args[1]
+        data = args[3] if len(args) > 3 else "{}"
+        r = run_officecli(["merge", temp, out, "--data", data, "--force"])
+        await reply_line(token, f"已合併：{out}" if r["ok"] else f"失敗：{r['err']}")
+    elif action == "download":
+        await reply_file(token, args[0])
+    elif action == "list":
+        files_now = [f.name for f in WORK_DIR.iterdir() if f.is_file()]
+        await reply_line(token, "目前檔案：\n" + ("\n".join(files_now) if files_now else "（沒有檔案）"))
+    elif action == "command":
+        r = run_officecli(args)
+        await reply_line(token, r["out"] or r["err"] or "完成")
+    else:
+        await reply_line(token, "無法判斷你想要的動作，請用 /help 查看指令")
 
 
 @app.post("/webhook")
@@ -263,7 +429,7 @@ async def webhook(request: Request):
             r = run_officecli(args)
             await reply_line(token, r["out"] or r["err"] or "完成")
         else:
-            await reply_line(token, "輸入 /help 查看說明")
+            await handle_natural_language(token, text, event["message"]["text"])
 
     return {"status": "ok"}
 
