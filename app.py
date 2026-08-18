@@ -22,6 +22,10 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.ap
 WORK_DIR = Path("/app/output")
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+# 記憶型 log（最近 N 條 webhook 事件，供診斷）
+EVENT_LOG: list = []
+EVENT_LOG_MAX = 50
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
@@ -415,6 +419,19 @@ async def handle_natural_language(token: str, text: str, raw: str):
         await reply_line(token, "無法判斷你想要的動作，請用 /help 查看指令")
 
 
+def log_event(kind: str, detail: str):
+    """記錄 webhook 事件（記憶型，供診斷）。"""
+    import time as _t
+    EVENT_LOG.append({"t": _t.strftime("%H:%M:%S"), "kind": kind, "detail": detail})
+    del EVENT_LOG[:-EVENT_LOG_MAX]
+
+
+@app.get("/debug-log")
+def debug_log():
+    """診斷：回傳最近 webhook 事件紀錄。"""
+    return {"ok": True, "events": EVENT_LOG}
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
     raw = await request.body()
@@ -449,40 +466,54 @@ async def webhook(request: Request):
             continue
 
         text = event["message"]["text"].strip()
+        log_event("received", text)
 
-        if text in ["/help", "help"]:
-            await reply_line(token, HELP)
-        elif text.startswith("/create "):
-            filename = text[8:].strip()
-            r = run_officecli(["create", filename])
-            await reply_result(token, r, f"已建立：{filename}", ["create", filename])
-        elif text.startswith("/get "):
-            filename = text[5:].strip()
-            await reply_file(token, filename)
-        elif text in ["/list", "list"]:
-            files = sorted([f.name for f in WORK_DIR.iterdir() if f.is_file()])
-            await reply_line(token, "目前檔案：\n" + ("\n".join(files) if files else "（沒有檔案）"))
-        elif text.startswith("/merge "):
-            parts = text[7:].split()
-            if len(parts) >= 3:
-                template, output = parts[0], parts[1]
-                data_json = " ".join(parts[2:])
-                data_file = None
-                # 若第三個參數是現有 JSON 檔路徑
-                cand = WORK_DIR / data_json
-                if cand.is_file():
-                    data_file = cand
-                args = ["merge", template, output, "--data", str(data_file) if data_file else data_json, "--force"]
+        try:
+            if text in ["/help", "help"]:
+                await reply_line(token, HELP)
+                log_event("handled", "help")
+            elif text.startswith("/create "):
+                filename = text[8:].strip()
+                r = run_officecli(["create", filename])
+                await reply_result(token, r, f"已建立：{filename}", ["create", filename])
+                log_event("handled", f"create {filename} ok={r['ok']}")
+            elif text.startswith("/get "):
+                filename = text[5:].strip()
+                await reply_file(token, filename)
+                log_event("handled", f"get {filename}")
+            elif text in ["/list", "list"]:
+                files = sorted([f.name for f in WORK_DIR.iterdir() if f.is_file()])
+                await reply_line(token, "目前檔案：\n" + ("\n".join(files) if files else "（沒有檔案）"))
+                log_event("handled", "list")
+            elif text.startswith("/merge "):
+                parts = text[7:].split()
+                if len(parts) >= 3:
+                    template, output = parts[0], parts[1]
+                    data_json = " ".join(parts[2:])
+                    data_file = None
+                    cand = WORK_DIR / data_json
+                    if cand.is_file():
+                        data_file = cand
+                    args = ["merge", template, output, "--data", str(data_file) if data_file else data_json, "--force"]
+                    r = run_officecli(args)
+                    await reply_result(token, r, f"已合併：{output}", args)
+                    log_event("handled", f"merge ok={r['ok']}")
+                else:
+                    await reply_line(token, "用法：/merge 模板 輸出 JSON\n範例：/merge letter.docx out.docx {\"name\":\"小明\"}")
+            elif text.startswith("/cmd "):
+                args = text[5:].strip().split()
                 r = run_officecli(args)
-                await reply_result(token, r, f"已合併：{output}", args)
+                await reply_result(token, r, r["out"] or "完成", args)
+                log_event("handled", f"cmd ok={r['ok']}")
             else:
-                await reply_line(token, "用法：/merge 模板 輸出 JSON\n範例：/merge letter.docx out.docx {\"name\":\"小明\"}")
-        elif text.startswith("/cmd "):
-            args = text[5:].strip().split()
-            r = run_officecli(args)
-            await reply_result(token, r, r["out"] or "完成", args)
-        else:
-            await handle_natural_language(token, text, event["message"]["text"])
+                await handle_natural_language(token, text, event["message"]["text"])
+                log_event("handled", "natural_language")
+        except Exception as e:
+            log_event("error", f"{type(e).__name__}: {e}")
+            try:
+                await reply_line(token, f"處理時發生錯誤：{type(e).__name__}: {e}")
+            except Exception:
+                pass
 
     return {"status": "ok"}
 
