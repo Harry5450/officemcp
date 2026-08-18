@@ -7,6 +7,7 @@ import logging
 import hashlib
 import hmac
 import base64
+import time
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -27,6 +28,7 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 # 記憶型 log（最近 N 條 webhook 事件，供診斷）
 EVENT_LOG: list = []
 EVENT_LOG_MAX = 50
+BOOT_TIME = int(time.time())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -69,7 +71,13 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3"}
+    import subprocess as sp
+    git = ""
+    try:
+        git = sp.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    except Exception:
+        git = ""
+    return {"status": "ok", "version": "4", "boot": BOOT_TIME, "git": git}
 
 
 @app.post("/create")
@@ -523,6 +531,22 @@ async def webhook(request: Request):
                 pass
 
     return {"status": "ok"}
+
+
+@app.get("/test-push")
+async def test_push():
+    """診斷：直接推一則測試訊息到已記錄的使用者（驗證 push API 通路）。"""
+    if not LINE_TOKEN:
+        return {"ok": False, "error": "LINE_TOKEN 未設定"}
+    if not LINE_USER_ID:
+        return {"ok": False, "error": "尚未取得 userId，請先在 Line 傳一則訊息", "hint": "LINE_USER_ID 環境變數可預設 userId"}
+    async with httpx.AsyncClient() as c:
+        r = await c.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+            json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": "測試 push 訊息 ✅ 若你看到這則，代表 push API 正常"}]},
+        )
+    return {"ok": r.status_code == 200, "http": r.status_code, "body": r.text[:300], "to": LINE_USER_ID}
 
 
 @app.get("/diag-env")
