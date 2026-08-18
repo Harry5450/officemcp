@@ -18,7 +18,8 @@ import httpx
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "Uf8528f219ab515ba80017faad4a8746d")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
+LINE_GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
@@ -134,17 +135,19 @@ def download(filename: str):
 
 async def send_line_message(token: str, messages: list):
     """送出 Line 訊息。
-    優先使用 push API（無 5 秒限制、可用多次），
-    取得 userId 後一律用 push；否則退回 reply（5 秒內）。
+    push 目標優先：群組/房間 > 使用者（避免「不能傳給 bot 自己」的限制，
+    因為 bot 擁有者的個人帳號無法用 API 收 push）。
+    否則退回 reply（5 秒內、僅一次）。
     """
     if not LINE_TOKEN:
         return
+    target = LINE_GROUP_ID or LINE_USER_ID
     async with httpx.AsyncClient() as c:
-        if LINE_USER_ID:
+        if target:
             r = await c.post(
                 "https://api.line.me/v2/bot/message/push",
                 headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-                json={"to": LINE_USER_ID, "messages": messages},
+                json={"to": target, "messages": messages},
             )
         else:
             r = await c.post(
@@ -450,12 +453,20 @@ async def webhook(request: Request):
 
     body = json.loads(raw.decode("utf-8"))
     for event in body.get("events", []):
-        # 記錄使用者 userId，之後用 push API 回覆（無 5 秒限制）
+        # 記錄 target（群組/房間優先，因為 bot 擁有者的個人帳號無法收 push）
+        global LINE_GROUP_ID
+        global LINE_USER_ID
         src = event.get("source", {})
-        uid = src.get("userId") or src.get("groupId") or src.get("roomId")
-        if uid:
-            global LINE_USER_ID
+        gid = src.get("groupId")
+        rid = src.get("roomId")
+        uid = src.get("userId")
+        if gid:
+            LINE_GROUP_ID = gid
+        if rid:
+            LINE_USER_ID = rid
+        if uid and not (gid or rid):
             LINE_USER_ID = uid
+        log_event("source", f"group={gid} room={rid} user={uid}")
         if event.get("type") != "message":
             continue
         token = event["replyToken"]
@@ -535,18 +546,20 @@ async def webhook(request: Request):
 
 @app.get("/test-push")
 async def test_push():
-    """診斷：直接推一則測試訊息到已記錄的使用者（驗證 push API 通路）。"""
+    """診斷：直接推一則測試訊息到已記錄的群組/使用者（驗證 push API 通路）。"""
     if not LINE_TOKEN:
         return {"ok": False, "error": "LINE_TOKEN 未設定"}
-    if not LINE_USER_ID:
-        return {"ok": False, "error": "尚未取得 userId，請先在 Line 傳一則訊息", "hint": "LINE_USER_ID 環境變數可預設 userId"}
+    target = LINE_GROUP_ID or LINE_USER_ID
+    if not target:
+        return {"ok": False, "error": "尚未取得 target，請先在 Line 傳一則訊息或把 bot 加入群組"}
     async with httpx.AsyncClient() as c:
         r = await c.post(
             "https://api.line.me/v2/bot/message/push",
             headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-            json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": "測試 push 訊息 ✅ 若你看到這則，代表 push API 正常"}]},
+            json={"to": target, "messages": [{"type": "text", "text": "測試 push 訊息 ✅ 若你看到這則，代表 push API 正常"}]},
         )
-    return {"ok": r.status_code == 200, "http": r.status_code, "body": r.text[:300], "to": LINE_USER_ID}
+    return {"ok": r.status_code == 200, "http": r.status_code, "body": r.text[:300],
+            "to": target, "to_type": "group" if LINE_GROUP_ID else "user"}
 
 
 @app.get("/diag-env")
