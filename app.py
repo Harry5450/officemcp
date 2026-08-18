@@ -18,7 +18,7 @@ import httpx
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "U3cd7fa54416c25e1472fd8b747a8ead2")
 LINE_GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
