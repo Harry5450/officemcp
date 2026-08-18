@@ -210,6 +210,9 @@ def run_officecli(args: list, timeout: int = 60) -> dict:
     oc = find_officecli()
     cmd = [oc] + args
     env = {**os.environ, "PATH": f"{os.path.dirname(oc)}:{os.environ.get('PATH', '')}"}
+    # FastAPI 每個請求會啟動獨立 subprocess；關閉 OfficeCLI resident，
+    # 讓每個 create/add/set 命令都直接開檔並寫回磁碟，避免跨 subprocess 快取不同步。
+    env.setdefault("OFFICECLI_NO_AUTO_RESIDENT", "1")
     work_dir = active_work_dir()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(work_dir), env=env)
@@ -466,6 +469,21 @@ def read_docx_content(filename: str, max_chars: int = 12000) -> dict:
 
 # --- 自然語言解析 ---
 
+def officecli_add_parent(filename: str) -> str:
+    """回傳 OfficeCLI add 的格式化父節點。Word 段落應掛在 /body。"""
+    return "/body" if Path(filename).suffix.lower() in (".docx", ".docm") else "/"
+
+
+def verify_docx_contains(filename: str, expected: list[str]) -> dict:
+    """讀回已產生 DOCX，確認預期文字真的落在磁碟檔案內。"""
+    doc = read_docx_content(filename)
+    if not doc["ok"]:
+        return doc
+    missing = [text for text in expected if text and text not in doc["content"]]
+    if missing:
+        return {"ok": False, "error": f"文件寫入驗證失敗，缺少：{'、'.join(missing[:8])}"}
+    return {"ok": True, "content": doc["content"]}
+
 def parse_create_content(text: str) -> dict | None:
     """解析「建立文件並包含欄位／內容」的複合需求。
 
@@ -642,7 +660,8 @@ def parse_rule(text: str) -> dict | None:
     m = re.search(fname_pat + r"\s*(?:裡|中)?\s*(?:請|幫我|麻煩|可不可以|能不能)?\s*(加|插入|新增|寫入|加入|加上|填|補)(?:入)?\s*(標題|標題列|heading|title)\s*(?::|：)?\s*(.{1,200}?)\s*$", text, re.IGNORECASE)
     if m:
         fname, content = m.group(1), m.group(4).strip()
-        return {"action": "add_title", "args": ["add", clean_fname(fname), "/", "--type", "paragraph", "--prop", f"text={content}"]}
+        target = clean_fname(fname)
+        return {"action": "add_title", "args": ["add", target, officecli_add_parent(target), "--type", "paragraph", "--prop", f"text={content}"]}
 
     # 「把 X.docx 內容改成/改為/換成 新內容」→ 修改第一段
     m = re.search(r"(?:把|將)?\s*" + fname_pat + r"\s*(?:的|裡面的|裡)?\s*(?:內容|文字|文字內容)?\s*(改為|改成|換成|更新成|覆蓋|覆寫|改)\s*(?:成|為)?\s*(.{1,200}?)\s*$", text)
@@ -657,7 +676,8 @@ def parse_rule(text: str) -> dict | None:
         fname, content = m.group(1), m.group(3).strip()
         # 若內容含「說/講/寫」當引導詞，吃掉它
         content = re.sub(r"^(說|講|寫|內容是|內容為|打)\s*", "", content)
-        return {"action": "add_text", "args": ["add", clean_fname(fname), "/", "--type", "paragraph", "--prop", f"text={content}"]}
+        target = clean_fname(fname)
+        return {"action": "add_text", "args": ["add", target, officecli_add_parent(target), "--type", "paragraph", "--prop", f"text={content}"]}
 
     return None
 
@@ -684,8 +704,8 @@ def gemini_payload(text: str, file_context: list) -> dict:
         "可用動作與對應指令：\n"
         "create: 建立檔案，args 形如 [\"create\", \"檔案.docx\"]\n"
         "create_content: 建立並寫入內容，args 形如 [\"會議紀錄.docx\", \"會議紀錄\", \"會議主題：\", \"日期：\", \"待辦事項：\"]\n"
-        "add_text: 在文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
-        "add_title: 在文件加入標題文字，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]\n"
+        "add_text: 在 Word 文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/body\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
+        "add_title: 在 Word 文件加入標題文字，args 形如 [\"add\", \"檔案.docx\", \"/body\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]\n"
         "replace_text: 修改/覆寫文件內容，args 形如 [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]\n"
         "merge: 合併模板，args 形如 [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]\n"
         "command: 其他 officecli 指令\n"
@@ -723,8 +743,8 @@ def zen_payload(text: str, file_context: list) -> dict:
         "不要回覆 Markdown、解釋或其他文字。"
         "create: [\"create\", \"檔案.docx\"]；"
         "create_content: 建立並寫入內容，args 為 [\"檔案.docx\", \"標題\", \"段落或欄位1\", \"段落或欄位2\"]；"
-        "add_text: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]；"
-        "add_title: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]；"
+        "add_text: [\"add\", \"檔案.docx\", \"/body\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]；"
+        "add_title: [\"add\", \"檔案.docx\", \"/body\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]；"
         "replace_text: [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]；"
         "merge: [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]；"
         "download: [\"檔案.docx\"]；list: []；templates: []。"
@@ -1072,7 +1092,8 @@ async def handle_document_content(token: str, request_text: str, source_filename
     lines = [line.strip() for line in plan["content"].splitlines() if line.strip()]
     for line in lines[:120]:
         result = run_officecli([
-            "add", output_filename, "/", "--type", "paragraph", "--prop", f"text={line}"
+            "add", output_filename, officecli_add_parent(output_filename),
+            "--type", "paragraph", "--prop", f"text={line}"
         ])
         if not result["ok"]:
             await reply_line(token, f"寫入整理內容失敗：{result['err']}")
@@ -1158,23 +1179,33 @@ async def handle_natural_language(token: str, text: str, raw: str):
         fname = next_office_filename(str(content_args[0]))
         title = str(content_args[1]).strip() if len(content_args) > 1 else Path(fname).stem
         sections = [str(item).strip() for item in content_args[2:] if str(item).strip()]
+        if not sections and "會議紀錄" in f"{fname}{title}":
+            sections = ["會議主題：", "日期：", "出席人員：", "討論事項：", "決議事項：", "待辦事項："]
         create_args = ["create", fname]
+        parent = officecli_add_parent(fname)
         r = run_officecli(create_args)
         if not r["ok"]:
             await reply_result(token, r, f"建立失敗：{fname}", create_args)
             return
         if title:
             r = run_officecli([
-                "add", fname, "/", "--type", "paragraph", "--prop", f"text={title}"
+                "add", fname, parent, "--type", "paragraph",
+                "--prop", "bold=true", "--prop", "size=18pt",
+                "--prop", "align=center", "--prop", "spaceAfter=12pt",
+                "--prop", f"text={title}"
             ])
-        for section in sections:
-            if not r["ok"]:
-                break
+        if r["ok"] and sections:
+            body_text = "\n".join(sections)
             r = run_officecli([
-                "add", fname, "/", "--type", "paragraph", "--prop", f"text={section}"
+                "add", fname, parent, "--type", "paragraph", "--prop", f"text={body_text}"
             ])
         if r["ok"]:
             r = run_officecli(["save", fname])
+        if r["ok"]:
+            verification = verify_docx_contains(fname, [title, *sections])
+            if not verification["ok"]:
+                await reply_line(token, f"文件已建立，但內容驗證失敗：{verification['error']}")
+                return
         await reply_result(token, r, f"已建立並寫入：{fname}", create_args)
     elif action == "create_text":
         fname = Path(args[0]).name

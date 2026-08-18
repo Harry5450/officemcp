@@ -54,6 +54,7 @@
 ### 3.3 自然語言解析（規則優先 + Zen/Gemini 兜底）
 - 含「建立…Word，包含／包括…」的複合需求會走 create_content：先建立檔案，再寫入標題與欄位，避免只產生空白文件。
 - 複合建立遇到同名檔案會自動加序號（例如 會議紀錄_2.docx），保留原檔，不直接覆蓋。
+- 複合建立完成後會讀回 DOCX 驗證標題與欄位；驗證失敗不會回傳下載成功訊息。
 - `parse_rule()` 先跑正規表示式；**規則失敗才呼叫 LLM**（`ask_llm`）。
 - 有 `OPENCODE_ZEN_API_KEY` 時預設先呼叫 OpenCode Zen 的 `chat/completions`；失敗或限流時自動改呼叫 Gemini。
 - 可用 `AI_PROVIDER=gemini` 將順序反轉。兩個 key 都沒有時，才回覆 `/help`。
@@ -78,6 +79,7 @@
 
 ### 3.4 OfficeCLI 用法（關鍵指令）
 - docx add 目前只用 paragraph 寫入標題文字；不要使用不支援的 heading element type。
+- 伺服器整合固定使用 OFFICECLI_NO_AUTO_RESIDENT=1 direct mode；Word 段落父節點使用 /body，避免跨 subprocess resident 快取不同步。
 - 二進位：`/usr/local/bin/officecli`，執行時 `cwd=/app/output`。
 - `create <檔名>` / `add <檔名> / --type paragraph --prop text=內容` / `set <檔名> /body/p[1] --prop text=內容 --force` / `merge <模板> <輸出> --data <json> --force` / `save <檔名>`（flush 到磁碟）。
 - **記憶體快取**：`create/add` 後需 `save` 才寫入磁碟。`reply_result` 會自動補 `save`。
