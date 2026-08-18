@@ -434,6 +434,19 @@ async def webhook(request: Request):
     return {"status": "ok"}
 
 
+@app.get("/diag-env")
+def diag_env():
+    """診斷：檢查關鍵環境變數是否已設定（不顯示內容）。"""
+    return {
+        "ok": True,
+        "LINE_TOKEN": bool(LINE_TOKEN),
+        "LINE_SECRET": bool(LINE_SECRET),
+        "GEMINI_KEY_set": bool(GEMINI_KEY),
+        "GEMINI_KEY_prefix": GEMINI_KEY[:4] if GEMINI_KEY else "",
+        "GEMINI_MODEL": GEMINI_MODEL,
+    }
+
+
 @app.get("/line-status")
 async def line_status():
     """檢查 LINE bot 連線狀態。"""
