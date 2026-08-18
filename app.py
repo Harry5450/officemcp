@@ -1258,9 +1258,10 @@ async def handle_document_draft(token: str, request_text: str):
         "--prop", f"text={title}",
     ])
     if result["ok"] and content_lines:
+        body_text = "\n".join(content_lines[:120])
         result = run_officecli([
             "add", filename, parent, "--type", "paragraph",
-            "--prop", f"text={'\n'.join(content_lines[:120])}",
+            "--prop", f"text={body_text}",
         ])
     if result["ok"]:
         result = run_officecli(["save", filename])
