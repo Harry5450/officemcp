@@ -300,26 +300,41 @@ async def send_line_message(token: str, messages: list):
     """送出 Line 訊息。
     push 目標優先：群組/房間 > 使用者（避免「不能傳給 bot 自己」的限制，
     因為 bot 擁有者的個人帳號無法用 API 收 push）。
-    否則退回 reply（5 秒內、僅一次）。
+    push 明確失敗時退回 reply（reply token 仍有效時可避免完全無回應）。
     """
     if not LINE_TOKEN:
+        log_event("reply_error", "LINE_TOKEN 未設定")
         return
     target = ACTIVE_LINE_TARGET.get() or LINE_GROUP_ID or LINE_USER_ID
-    async with httpx.AsyncClient() as c:
-        if target:
-            r = await c.post(
-                "https://api.line.me/v2/bot/message/push",
-                headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-                json={"to": target, "messages": messages},
-            )
-        else:
-            r = await c.post(
-                "https://api.line.me/v2/bot/message/reply",
-                headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
-                json={"replyToken": token, "messages": messages},
-            )
-    if r.status_code != 200:
-        log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
+    headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient() as c:
+            if target:
+                r = await c.post(
+                    "https://api.line.me/v2/bot/message/push",
+                    headers=headers,
+                    json={"to": target, "messages": messages},
+                )
+                if r.status_code == 200:
+                    return
+                log_event("push_error", f"HTTP {r.status_code}: {r.text[:200]}")
+                if not token:
+                    return
+                r = await c.post(
+                    "https://api.line.me/v2/bot/message/reply",
+                    headers=headers,
+                    json={"replyToken": token, "messages": messages},
+                )
+            else:
+                r = await c.post(
+                    "https://api.line.me/v2/bot/message/reply",
+                    headers=headers,
+                    json={"replyToken": token, "messages": messages},
+                )
+            if r.status_code != 200:
+                log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        log_event("reply_error", f"{type(e).__name__}: {e}")
 
 
 async def reply_line(token: str, text: str):

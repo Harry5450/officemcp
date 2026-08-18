@@ -42,7 +42,7 @@
 
 ### 3.1 LINE 回覆機制（踩過的坑，勿回退）
 - **改用 push API（`/v2/bot/message/push`）**，因為 reply API 的 token **只能用一次且必須 5 秒內送出**，officecli 處理超過 5 秒會靜默失敗。
-- **`send_line_message()`**：Webhook 回覆優先使用該事件的群組／聊天室／個人 target，再退回環境變數 target；失敗會記錄到 `/debug-log`。這是多人使用時避免回錯聊天室的關鍵。
+- **`send_line_message()`**：Webhook 回覆優先使用該事件的群組／聊天室／個人 target，再退回環境變數 target；push 明確失敗時會嘗試使用尚未過期的 reply token，並記錄到 `/debug-log`。這是多人使用時避免回錯聊天室與完全無回應的關鍵。
 - **不能 push 到「bot 自己的 userId」**：`Uf8528f219ab515ba80017faad4a8746d` 是 bot 自身，會回 `You can't send messages to yourself`。使用者正確 userId 是 `U3cd7fa54416c25e1472fd8b747a8ead2`。
 
 ### 3.2 檔案回傳（免費方案相容）
