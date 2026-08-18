@@ -1,6 +1,6 @@
 # officemcp — Codex 接手交接文件
 
-> 交接日期：2026-08-18（交接者：OpenCode；接手者：Codex）
+> 交接日期：2026-08-19（交接者：OpenCode；接手者：Codex）
 > 專案目的：OfficeCLI 驅動的 FastAPI 伺服器 + LINE Bot，讓使用者用 LINE 以自然語言建立/編輯/下載 Word、Excel、PowerPoint 文件，成功後自動回傳下載連結。
 
 ---
@@ -55,9 +55,10 @@
 - 含「建立…Word，包含／包括…」的複合需求會走 create_content：先建立檔案，再寫入標題與欄位，避免只產生空白文件。
 - 複合建立遇到同名檔案會自動加序號（例如 會議紀錄_2.docx），保留原檔，不直接覆蓋。
 - 複合建立完成後會讀回 DOCX 驗證標題與欄位；驗證失敗不會回傳下載成功訊息。
+- 「建立致詞稿／講稿／報告，約 N 字」等稿件型自然語言會先走專用 AI 撰稿流程，再以標題與多段正文寫入 Word；寫入後會讀回驗證，失敗不提供下載連結。
 - `parse_rule()` 先跑正規表示式；**規則失敗才呼叫 LLM**（`ask_llm`）。
 - 有 `OPENCODE_ZEN_API_KEY` 時預設先呼叫 OpenCode Zen 的 `chat/completions`；失敗或限流時自動改呼叫 Gemini。
-- 可用 `AI_PROVIDER=gemini` 將順序反轉。兩個 key 都沒有時，才回覆 `/help`。
+- 可用 `AI_PROVIDER=gemini` 將順序反轉。一般自然語言兩個 key 都沒有時回覆 `/help`；稿件型需求會明確提示要設定 AI 金鑰。
 - 支援動作：`create` / `create_content` / `create_text` / `add_text` / `add_title` / `replace_text` / `merge` / `merge_open` / `download` / `list` / `templates`；`/cmd` 與任意 `command` 僅限管理員。
 - 「你要回傳給我」「把剛剛的檔案傳回來」等沒有檔名的後續訊息，會回傳最近建立的 Office 檔案。
 - 建立成功訊息會使用實際檔名，並在同一則 LINE 訊息附上下載連結；不要回退成 `args[0]`（那會是 `create`）。
@@ -75,6 +76,7 @@
   - 「幫我在報告.docx 加入標題 季度報告」「把 notes.docx 的內容改成 新的內容」
   - 「幫我建立一個 Excel 檔案叫 客戶名單」
   - 「幫我建立一份會議紀錄 Word，包含會議主題、日期、出席人員、討論事項與待辦事項」
+  - 「幫我建立一份給縣長的長青食堂巡禮致詞稿，格式不拘，約 500 字」（走 AI 撰稿流程）
 - **已知限制**：「把 letter.docx 合併成 out.docx」走 Gemini（merge 規則在 parse_rule 中位置導致）—可接受。
 
 ### 3.4 OfficeCLI 用法（關鍵指令）
@@ -92,7 +94,7 @@
 
 | 端點 | 用途 |
 |------|------|
-| `/health` | 狀態 + `boot` 時間戳 + git commit + LINE 設定布林值與 webhook 診斷計數（不回傳 token 或訊息內容） |
+| `/health` | 狀態 + `boot` 時間戳 + git commit + LINE／AI 設定布林值與 webhook 診斷計數（不回傳 token 或訊息內容） |
 | `/files` | 列出已建立檔案 |
 | `/diag-files` | 檔案 + UTF-8 hex |
 | `/templates` | 管理員查看目前 workspace 的個人／共用範本 |
@@ -118,6 +120,7 @@
 9. **多人上線前置條件**：部署前必須設定強隨機 `ADMIN_API_TOKEN` 與 `DOWNLOAD_SECRET`，並驗證不同 LINE user／group 的檔案、範本、下載 token 不會互通。管理 API 沒有 token 會回 403。
 10. **範本版本治理**：目前已有個人／共用目錄與同名防覆蓋，但尚未建立完整 `template_id/version/status/fields_schema` registry；正式商用前需補上審核與版本清單。
 11. **個人記憶**：目前尚未開放可編輯的長期 AI 記憶；`EVENT_LOG` 只作管理診斷，已標記 workspace，不能當作使用者記憶或跨 workspace 上下文。
+12. **AI 金鑰驗證**：本機目前的 `GEMINI_API_KEY` 測試回 HTTP 401，未在輸出中顯示金鑰；部署環境要用 `/health` 的 `zen_key_set`／`gemini_key_set` 確認是否有設定，再以 LINE 實測 provider 是否可用。
 
 ## 6. 給 Codex 的建議工作流程
 

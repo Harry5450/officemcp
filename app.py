@@ -243,6 +243,9 @@ def health():
         "git": git,
         "line_token_set": bool(LINE_TOKEN),
         "line_secret_set": bool(LINE_SECRET),
+        "ai_provider": AI_PROVIDER,
+        "zen_key_set": bool(ZEN_KEY),
+        "gemini_key_set": bool(GEMINI_KEY),
         "webhook": dict(WEBHOOK_STATUS),
     }
 
@@ -426,6 +429,18 @@ def is_document_content_request(text: str) -> bool:
         r"(摘要|總結|重點|整理|歸納|分析|閱讀|讀取|讀懂|改寫|潤稿|正式版|白話|校對|內容分析|整理成)",
         text,
     ))
+
+
+def is_document_draft_request(text: str) -> bool:
+    """判斷是否要 AI 從自然語言撰寫一份新的稿件型 Word。"""
+    import re
+
+    if re.search(r"\.(?:docx|xlsx|pptx)\b", text, re.IGNORECASE):
+        return False
+    create = r"(建立|新增|製作|產生|生成|幫我寫|幫我撰寫|寫一份|撰寫)"
+    genre = r"(致詞稿|講稿|演講稿|發言稿|稿件|報告|企劃書|新聞稿|文案|邀請函|公文|文章|信件)"
+    length_or_format = r"(約\s*\d+\s*字|格式不拘|字數|內容)"
+    return bool(re.search(create, text) and (re.search(genre, text) or re.search(length_or_format, text)))
 
 
 def read_docx_content(filename: str, max_chars: int = 12000) -> dict:
@@ -854,6 +869,68 @@ def parse_document_plan(output: str) -> dict | None:
     return {"mode": mode, "filename": filename, "content": content.strip()}
 
 
+def safe_draft_filename(requested: str = "", title: str = "") -> str:
+    """把 AI 建議的檔名限制成安全的 Word 檔名。"""
+    import re
+
+    candidate = Path(str(requested or "")).name.strip()
+    if not candidate or candidate in {".", ".."}:
+        candidate = title.strip() or "文件"
+    stem = Path(candidate).stem or "文件"
+    stem = re.sub(r'[<>:"/\\|?*]', "_", stem).strip(" .") or "文件"
+    return f"{stem}.docx"
+
+
+def draft_document_prompts(request: str) -> tuple[str, str]:
+    """建立新文件時，要求 AI 產出可直接寫入 DOCX 的稿件。"""
+    system = (
+        "你是繁體中文 Office 文件撰稿助理。使用者要建立一份新的 Word 文件，"
+        "請依照需求撰寫可直接使用的內容。只回覆 JSON，格式為 "
+        '{"filename":"安全檔名.docx","title":"文件標題","content":"完整內容"}。'
+        "filename 必須是安全的 .docx 檔名；title 是文件標題；content 是正文，"
+        "請使用 \\n 分隔段落，不要輸出 Markdown code fence、說明文字或 JSON 以外的內容。"
+        "若需求指定約 N 字，正文長度請盡量接近 N 個中文字（可有合理誤差），"
+        "不要為未提供的姓名、日期、政策數據或事實擅自捏造具體資訊；"
+        "演講稿、致詞稿等請寫成自然、莊重、可直接朗讀的繁體中文。"
+    )
+    user = f"使用者需求：{request}"
+    return system, user
+
+
+def zen_draft_payload(request: str) -> dict:
+    system, user = draft_document_prompts(request)
+    return {
+        "model": ZEN_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.4,
+        "max_tokens": 2400,
+    }
+
+
+def gemini_draft_payload(request: str) -> dict:
+    system, user = draft_document_prompts(request)
+    return {
+        "contents": [{"parts": [{"text": system}, {"text": user}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2400},
+    }
+
+
+def parse_draft_plan(output: str) -> dict | None:
+    """解析新文件撰稿 AI 的 JSON 回覆。"""
+    data = parse_json_object(output)
+    if data is None:
+        return None
+    content = data.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    title = str(data.get("title") or "").strip()
+    filename = safe_draft_filename(str(data.get("filename") or ""), title)
+    return {"filename": filename, "title": title, "content": content.strip()}
+
+
 async def ask_zen(text: str, file_context: list) -> dict | None:
     """呼叫 OpenCode Zen DeepSeek 將自然語言轉成 officecli 計畫。"""
     if not ZEN_KEY:
@@ -944,6 +1021,56 @@ async def ask_document_ai(request: str, filename: str, document_text: str) -> di
         plan = await caller(request, filename, document_text)
         if plan is not None:
             logger.info("document AI provider=%s mode=%s", name, plan.get("mode"))
+            return plan
+    return None
+
+
+async def ask_zen_draft(request: str) -> dict | None:
+    """用 OpenCode Zen 撰寫新 Word 文件內容。"""
+    if not ZEN_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(zen_url(), headers=zen_headers(), json=zen_draft_payload(request))
+            if r.status_code != 200:
+                logger.error("OpenCode Zen draft error %s: %s", r.status_code, r.text[:200])
+                return None
+            data = r.json()
+            out = data["choices"][0]["message"]["content"]
+            return parse_draft_plan(out)
+    except Exception as e:
+        logger.warning("OpenCode Zen draft failed: %s", e)
+        return None
+
+
+async def ask_gemini_draft(request: str) -> dict | None:
+    """用 Gemini 撰寫新 Word 文件內容，作為 Zen 的備援。"""
+    if not GEMINI_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(gemini_url(), headers=gemini_headers(), json=gemini_draft_payload(request))
+            if r.status_code != 200:
+                logger.error("Gemini draft error %s: %s", r.status_code, r.text[:200])
+                return None
+            data = r.json()
+            out = data["candidates"][0]["content"]["parts"][0]["text"]
+            return parse_draft_plan(out)
+    except Exception as e:
+        logger.warning("Gemini draft failed: %s", e)
+        return None
+
+
+async def ask_draft_ai(request: str) -> dict | None:
+    """依 provider 順序產出新文件稿件。"""
+    if AI_PROVIDER in ("gemini", "google"):
+        providers = [("Gemini", ask_gemini_draft), ("OpenCode Zen", ask_zen_draft)]
+    else:
+        providers = [("OpenCode Zen", ask_zen_draft), ("Gemini", ask_gemini_draft)]
+    for name, caller in providers:
+        plan = await caller(request)
+        if plan is not None:
+            logger.info("draft AI provider=%s filename=%s", name, plan.get("filename"))
             return plan
     return None
 
@@ -1101,6 +1228,53 @@ async def handle_document_content(token: str, request_text: str, source_filename
     await reply_result(token, result, f"已整理並建立：{output_filename}", ["create", output_filename])
 
 
+async def handle_document_draft(token: str, request_text: str):
+    """用 AI 撰寫新稿件，再以段落與標題寫入 DOCX。"""
+    if not (ZEN_KEY or GEMINI_KEY):
+        await reply_line(token, "目前尚未設定 AI 撰稿服務，請在 Zeabur 設定 OPENCODE_ZEN_API_KEY 或 GEMINI_API_KEY。")
+        return
+    plan = await ask_draft_ai(request_text)
+    if plan is None:
+        await reply_line(token, "AI 撰稿服務目前無法回應，文件尚未建立；請稍後再試。")
+        return
+
+    title = plan.get("title", "").strip() or Path(plan["filename"]).stem
+    filename = next_office_filename(safe_draft_filename(plan.get("filename", ""), title))
+    content_lines = [line.strip() for line in plan["content"].splitlines() if line.strip()]
+    if content_lines and content_lines[0] == title:
+        content_lines = content_lines[1:]
+
+    create_args = ["create", filename]
+    result = run_officecli(create_args)
+    if not result["ok"]:
+        await reply_line(token, f"建立稿件失敗：{result['err']}")
+        return
+
+    parent = officecli_add_parent(filename)
+    result = run_officecli([
+        "add", filename, parent, "--type", "paragraph",
+        "--prop", "bold=true", "--prop", "size=18pt",
+        "--prop", "align=center", "--prop", "spaceAfter=12pt",
+        "--prop", f"text={title}",
+    ])
+    if result["ok"] and content_lines:
+        result = run_officecli([
+            "add", filename, parent, "--type", "paragraph",
+            "--prop", f"text={'\n'.join(content_lines[:120])}",
+        ])
+    if result["ok"]:
+        result = run_officecli(["save", filename])
+    if not result["ok"]:
+        await reply_line(token, f"寫入稿件失敗：{result['err']}")
+        return
+
+    verification = verify_docx_contains(filename, [title, *content_lines[:120]])
+    if not verification["ok"]:
+        await reply_line(token, f"稿件已產生但內容驗證失敗，未提供下載連結：{verification['error']}")
+        return
+    await reply_result(token, result, f"已建立稿件：{filename}", create_args)
+
+
 HELP = """OfficeCLI Line Bot
 
 /create [檔名] - 建立文件
@@ -1145,6 +1319,12 @@ async def handle_natural_language(token: str, text: str, raw: str):
         if re.search(r"(這份|這個|上傳|剛剛|摘要|讀取|分析|改寫|原文)", text):
             await reply_line(token, "請先上傳要處理的 Word 文件，再告訴我想摘要、整理或改寫什麼。")
             return
+
+    # 新稿件要先由 AI 產生正文，不能只建立空白 Word 或交給只會回傳 officecli
+    # 指令的通用規則；例如「幫我建立給縣長的長青食堂巡禮致詞稿，約 500 字」。
+    if is_document_draft_request(text):
+        await handle_document_draft(token, text)
+        return
 
     files_now = [f.name for f in active_work_dir().iterdir() if f.is_file()]
 
