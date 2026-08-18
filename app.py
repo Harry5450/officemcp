@@ -274,6 +274,8 @@ async def reply_file(token: str, filename: str):
     if not path.is_file():
         await reply_line(token, f"檔案不存在：{fsafe}")
         return
+    import urllib.parse
+    dl_url = public_url(f"/download/{urllib.parse.quote(fsafe)}")
     async with httpx.AsyncClient() as c:
         await c.post(
             "https://api.line.me/v2/bot/message/reply",
@@ -282,10 +284,47 @@ async def reply_file(token: str, filename: str):
                 "replyToken": token,
                 "messages": [{
                     "type": "file",
-                    "originalContentUrl": public_url(f"/download/{fsafe}"),
+                    "originalContentUrl": dl_url,
                     "fileName": fsafe,
                 }]
             }
+        )
+
+
+def office_file_in_args(args: list) -> str | None:
+    """從 officecli args 找出主要 Office 檔案名（第一個含副檔名的檔案）。"""
+    for a in args:
+        n = Path(str(a)).name
+        if n.lower().endswith((".docx", ".xlsx", ".pptx")):
+            return n
+    return None
+
+
+async def reply_result(token: str, r: dict, ok_msg: str, args: list | None = None):
+    """執行結果回覆：一次 reply 送出文字 + 自動產生的檔案（若該動作產生文件）。"""
+    if not LINE_TOKEN:
+        return
+    if not r["ok"]:
+        await reply_line(token, f"失敗：{r['err']}")
+        return
+    messages = [{"type": "text", "text": ok_msg}]
+    fname = office_file_in_args(args or [])
+    if fname:
+        # 確保 resident 快取已寫入磁碟（officecli save 強制 flush）
+        run_officecli(["save", fname])
+        path = WORK_DIR / Path(fname).name
+        if path.is_file():
+            import urllib.parse
+            messages.append({
+                "type": "file",
+                "originalContentUrl": public_url(f"/download/{urllib.parse.quote(fname)}"),
+                "fileName": Path(fname).name,
+            })
+    async with httpx.AsyncClient() as c:
+        await c.post(
+            "https://api.line.me/v2/bot/message/reply",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+            json={"replyToken": token, "messages": messages}
         )
 
 
@@ -336,7 +375,6 @@ async def handle_natural_language(token: str, text: str, raw: str):
     # 第一步：規則式
     plan = parse_rule(text)
     if plan is None and GEMINI_KEY:
-        await reply_line(token, "我來理解你的需求…（使用 AI 判斷）")
         plan = await ask_llm(text, files_now)
 
     if plan is None:
@@ -348,14 +386,14 @@ async def handle_natural_language(token: str, text: str, raw: str):
 
     if action == "create":
         r = run_officecli(["create", args[0]] if len(args) == 1 else args)
-        await reply_line(token, f"已建立：{args[0]}" if r["ok"] else f"失敗：{r['err']}")
+        await reply_result(token, r, f"已建立：{args[0]}", ["create", args[0]])
     elif action == "create_text":
         fname = Path(args[0]).name
         (WORK_DIR / fname).touch()
         await reply_line(token, f"已建立：{fname}")
     elif action == "add_text":
         r = run_officecli(args)
-        await reply_line(token, f"已加入內容" if r["ok"] else f"失敗：{r['err']}")
+        await reply_result(token, r, "已加入內容", args)
     elif action in ("merge", "merge_open"):
         # merge_open 尚未帶 data，提示需要資料
         if action == "merge_open":
@@ -364,7 +402,7 @@ async def handle_natural_language(token: str, text: str, raw: str):
         temp, out = args[0], args[1]
         data = args[3] if len(args) > 3 else "{}"
         r = run_officecli(["merge", temp, out, "--data", data, "--force"])
-        await reply_line(token, f"已合併：{out}" if r["ok"] else f"失敗：{r['err']}")
+        await reply_result(token, r, f"已合併：{out}", ["merge", out])
     elif action == "download":
         await reply_file(token, args[0])
     elif action == "list":
@@ -372,7 +410,7 @@ async def handle_natural_language(token: str, text: str, raw: str):
         await reply_line(token, "目前檔案：\n" + ("\n".join(files_now) if files_now else "（沒有檔案）"))
     elif action == "command":
         r = run_officecli(args)
-        await reply_line(token, r["out"] or r["err"] or "完成")
+        await reply_result(token, r, r["out"] or "完成", args)
     else:
         await reply_line(token, "無法判斷你想要的動作，請用 /help 查看指令")
 
@@ -417,7 +455,7 @@ async def webhook(request: Request):
         elif text.startswith("/create "):
             filename = text[8:].strip()
             r = run_officecli(["create", filename])
-            await reply_line(token, f"已建立：{filename}" if r["ok"] else f"失敗：{r['err']}")
+            await reply_result(token, r, f"已建立：{filename}", ["create", filename])
         elif text.startswith("/get "):
             filename = text[5:].strip()
             await reply_file(token, filename)
@@ -436,13 +474,13 @@ async def webhook(request: Request):
                     data_file = cand
                 args = ["merge", template, output, "--data", str(data_file) if data_file else data_json, "--force"]
                 r = run_officecli(args)
-                await reply_line(token, f"已合併：{output}" if r["ok"] else f"失敗：{r['err']}")
+                await reply_result(token, r, f"已合併：{output}", args)
             else:
                 await reply_line(token, "用法：/merge 模板 輸出 JSON\n範例：/merge letter.docx out.docx {\"name\":\"小明\"}")
         elif text.startswith("/cmd "):
             args = text[5:].strip().split()
             r = run_officecli(args)
-            await reply_line(token, r["out"] or r["err"] or "完成")
+            await reply_result(token, r, r["out"] or "完成", args)
         else:
             await handle_natural_language(token, text, event["message"]["text"])
 
