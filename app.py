@@ -638,11 +638,11 @@ def parse_rule(text: str) -> dict | None:
         s = re.sub(r"^(幫我|請|麻煩|在|把|將|中的|裡面的)+", "", s)
         return s
 
-    # 標題/heading：在 X 加入標題 標題文字（放在 add_text 前，避免被吃掉）
+    # 標題：目前 OfficeCLI docx add 支援 paragraph，不接受 heading element。
     m = re.search(fname_pat + r"\s*(?:裡|中)?\s*(?:請|幫我|麻煩|可不可以|能不能)?\s*(加|插入|新增|寫入|加入|加上|填|補)(?:入)?\s*(標題|標題列|heading|title)\s*(?::|：)?\s*(.{1,200}?)\s*$", text, re.IGNORECASE)
     if m:
         fname, content = m.group(1), m.group(4).strip()
-        return {"action": "add_title", "args": ["add", clean_fname(fname), "/", "--type", "heading", "--prop", f"text={content}"]}
+        return {"action": "add_title", "args": ["add", clean_fname(fname), "/", "--type", "paragraph", "--prop", f"text={content}"]}
 
     # 「把 X.docx 內容改成/改為/換成 新內容」→ 修改第一段
     m = re.search(r"(?:把|將)?\s*" + fname_pat + r"\s*(?:的|裡面的|裡)?\s*(?:內容|文字|文字內容)?\s*(改為|改成|換成|更新成|覆蓋|覆寫|改)\s*(?:成|為)?\s*(.{1,200}?)\s*$", text)
@@ -685,7 +685,7 @@ def gemini_payload(text: str, file_context: list) -> dict:
         "create: 建立檔案，args 形如 [\"create\", \"檔案.docx\"]\n"
         "create_content: 建立並寫入內容，args 形如 [\"會議紀錄.docx\", \"會議紀錄\", \"會議主題：\", \"日期：\", \"待辦事項：\"]\n"
         "add_text: 在文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
-        "add_title: 在文件加入標題，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"heading\", \"--prop\", \"text=標題\"]\n"
+        "add_title: 在文件加入標題文字，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]\n"
         "replace_text: 修改/覆寫文件內容，args 形如 [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]\n"
         "merge: 合併模板，args 形如 [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]\n"
         "command: 其他 officecli 指令\n"
@@ -724,7 +724,7 @@ def zen_payload(text: str, file_context: list) -> dict:
         "create: [\"create\", \"檔案.docx\"]；"
         "create_content: 建立並寫入內容，args 為 [\"檔案.docx\", \"標題\", \"段落或欄位1\", \"段落或欄位2\"]；"
         "add_text: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]；"
-        "add_title: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"heading\", \"--prop\", \"text=標題\"]；"
+        "add_title: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=標題\"]；"
         "replace_text: [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]；"
         "merge: [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]；"
         "download: [\"檔案.docx\"]；list: []；templates: []。"
@@ -1165,7 +1165,7 @@ async def handle_natural_language(token: str, text: str, raw: str):
             return
         if title:
             r = run_officecli([
-                "add", fname, "/", "--type", "heading", "--prop", f"text={title}"
+                "add", fname, "/", "--type", "paragraph", "--prop", f"text={title}"
             ])
         for section in sections:
             if not r["ok"]:

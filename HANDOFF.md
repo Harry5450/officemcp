@@ -77,6 +77,7 @@
 - **已知限制**：「把 letter.docx 合併成 out.docx」走 Gemini（merge 規則在 parse_rule 中位置導致）—可接受。
 
 ### 3.4 OfficeCLI 用法（關鍵指令）
+- docx add 目前只用 paragraph 寫入標題文字；不要使用不支援的 heading element type。
 - 二進位：`/usr/local/bin/officecli`，執行時 `cwd=/app/output`。
 - `create <檔名>` / `add <檔名> / --type paragraph --prop text=內容` / `set <檔名> /body/p[1] --prop text=內容 --force` / `merge <模板> <輸出> --data <json> --force` / `save <檔名>`（flush 到磁碟）。
 - **記憶體快取**：`create/add` 後需 `save` 才寫入磁碟。`reply_result` 會自動補 `save`。
