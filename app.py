@@ -206,10 +206,19 @@ def parse_rule(text: str) -> dict | None:
     return None
 
 
-async def ask_llm(text: str, file_context: list) -> dict | None:
-    """呼叫 Gemini 將自然語言轉成 officecli 指令。失敗或無 key 時回傳 None。"""
-    if not GEMINI_KEY or GEMINI_KEY.startswith("AQ.A"):
-        return None
+def gemini_url() -> str:
+    """建立 Gemini API URL，新格式 key 使用 x-goog-api-key header。"""
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+
+def gemini_headers() -> dict:
+    """新版 AQ.A 格式 key 用 header 傳遞；舊 AIza 用 query param。"""
+    if GEMINI_KEY.startswith("AIza"):
+        return {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
+    return {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
+
+
+def gemini_payload(text: str, file_context: list) -> dict:
     sys_prompt = (
         "你是 officecli 指令轉換器。officecli 是操作 Office 文件的 CLI。"
         "使用者的訊息可能是自然語言請求，請判斷使用者想要執行的動作，"
@@ -226,20 +235,26 @@ async def ask_llm(text: str, file_context: list) -> dict | None:
     )
     files_str = "，".join(file_context) if file_context else "（目前沒有檔案）"
     user_prompt = f"使用者訊息：{text}\n伺服器上現有檔案：{files_str}\n請回覆動作 JSON。"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}"
-    payload = {
+    return {
         "contents": [{"parts": [{"text": sys_prompt}, {"text": user_prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
     }
+
+
+async def ask_llm(text: str, file_context: list) -> dict | None:
+    """呼叫 Gemini 將自然語言轉成 officecli 指令。失敗或無 key 時回傳 None。"""
+    if not GEMINI_KEY:
+        return None
+    url = gemini_url()
+    headers = gemini_headers()
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(url, json=payload)
+            r = await c.post(url, headers=headers, json=gemini_payload(text, file_context))
             if r.status_code != 200:
                 logger.error("Gemini error %s: %s", r.status_code, r.text[:200])
                 return None
             data = r.json()
             out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            # 去除可能的 ```json 包裝
             out = out.strip("`")
             if out.lower().startswith("json"):
                 out = out[4:].lstrip()
@@ -320,7 +335,7 @@ async def handle_natural_language(token: str, text: str, raw: str):
 
     # 第一步：規則式
     plan = parse_rule(text)
-    if plan is None and GEMINI_KEY and not GEMINI_KEY.startswith("AQ.A"):
+    if plan is None and GEMINI_KEY:
         await reply_line(token, "我來理解你的需求…（使用 AI 判斷）")
         plan = await ask_llm(text, files_now)
 
@@ -445,6 +460,27 @@ def diag_env():
         "GEMINI_KEY_prefix": GEMINI_KEY[:4] if GEMINI_KEY else "",
         "GEMINI_MODEL": GEMINI_MODEL,
     }
+
+
+@app.get("/test-gemini")
+async def test_gemini():
+    """測試 Gemini API key 是否可用（不顯示 key）。"""
+    if not GEMINI_KEY:
+        return {"ok": False, "error": "GEMINI_API_KEY 未設定"}
+    results = {}
+    async with httpx.AsyncClient(timeout=20) as c:
+        # 方式1: header x-goog-api-key (新版格式)
+        r1 = await c.post(gemini_url(), headers=gemini_headers(),
+                          json={"contents": [{"parts": [{"text": "hi"}]}]})
+        results["header_key"] = {"http": r1.status_code, "ok": r1.status_code == 200,
+                                  "msg": (r1.text[:150] if r1.status_code != 200 else "works")}
+        # 方式2: query param key (舊版格式)
+        r2 = await c.post(gemini_url() + f"?key={GEMINI_KEY}",
+                          headers={"Content-Type": "application/json"},
+                          json={"contents": [{"parts": [{"text": "hi"}]}]})
+        results["query_key"] = {"http": r2.status_code, "ok": r2.status_code == 200,
+                                 "msg": (r2.text[:150] if r2.status_code != 200 else "works")}
+    return {"ok": True, "key_prefix": GEMINI_KEY[:4], "tests": results}
 
 
 @app.get("/line-status")
