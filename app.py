@@ -324,34 +324,9 @@ async def send_line_message(token: str, messages: list):
         log_event("reply_error", "LINE_TOKEN 未設定")
         return
     target = ACTIVE_LINE_TARGET.get() or LINE_GROUP_ID or LINE_USER_ID
-    prefer_reply = ACTIVE_LINE_SOURCE_KIND.get() == "user" and bool(token)
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient() as c:
-            if prefer_reply:
-                r = await c.post(
-                    "https://api.line.me/v2/bot/message/reply",
-                    headers=headers,
-                    json={"replyToken": token, "messages": messages},
-                )
-                if r.status_code == 200:
-                    WEBHOOK_STATUS["last_delivery"] = "reply_ok"
-                    return
-                WEBHOOK_STATUS["last_delivery"] = f"reply_http_{r.status_code}"
-                log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
-                if not target:
-                    return
-                r = await c.post(
-                    "https://api.line.me/v2/bot/message/push",
-                    headers=headers,
-                    json={"to": target, "messages": messages},
-                )
-                if r.status_code != 200:
-                    WEBHOOK_STATUS["last_delivery"] = f"push_http_{r.status_code}"
-                    log_event("push_error", f"HTTP {r.status_code}: {r.text[:200]}")
-                else:
-                    WEBHOOK_STATUS["last_delivery"] = "push_ok"
-                return
             if target:
                 r = await c.post(
                     "https://api.line.me/v2/bot/message/push",
