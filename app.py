@@ -55,6 +55,9 @@ WEBHOOK_STATUS = {
     "events": 0,
     "messages": 0,
     "last_event_type": "",
+    "last_source_kind": "",
+    "last_target_kind": "",
+    "last_target_matches_configured_user": False,
     "last_delivery": "",
 }
 
@@ -1126,6 +1129,10 @@ async def webhook(request: Request):
         workspace_id = workspace_id_for_source(src)
         target = gid or rid or uid or ""
         source_type = "group" if gid else ("room" if rid else ("user" if uid else "unknown"))
+        target_kind = "group" if gid else ("room" if rid else ("user" if uid else "configured_fallback"))
+        WEBHOOK_STATUS["last_source_kind"] = source_type
+        WEBHOOK_STATUS["last_target_kind"] = target_kind
+        WEBHOOK_STATUS["last_target_matches_configured_user"] = bool(uid and uid == LINE_USER_ID)
         workspace_token = ACTIVE_WORKSPACE_ID.set(workspace_id)
         target_token = ACTIVE_LINE_TARGET.set(target)
         source_kind_token = ACTIVE_LINE_SOURCE_KIND.set(source_type)
