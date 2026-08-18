@@ -300,7 +300,7 @@ async def ask_llm(text: str, file_context: list) -> dict | None:
 
 
 async def reply_file(token: str, filename: str):
-    """透過 Line 回傳檔案訊息。"""
+    """透過 Line 回傳檔案（以文字 + 下載連結，相容免費方案）。"""
     if not LINE_TOKEN:
         return
     fsafe = Path(filename).name
@@ -310,11 +310,9 @@ async def reply_file(token: str, filename: str):
         return
     import urllib.parse
     dl_url = public_url(f"/download/{urllib.parse.quote(fsafe)}")
-    await send_line_message(token, [{
-        "type": "file",
-        "originalContentUrl": dl_url,
-        "fileName": fsafe,
-    }])
+    await send_line_message(token, [
+        {"type": "text", "text": f"📎 {fsafe}\n\n下載：{dl_url}"}
+    ])
 
 
 def office_file_in_args(args: list) -> str | None:
@@ -327,7 +325,7 @@ def office_file_in_args(args: list) -> str | None:
 
 
 async def reply_result(token: str, r: dict, ok_msg: str, args: list | None = None):
-    """執行結果回覆：一次 reply 送出文字 + 自動產生的檔案（若該動作產生文件）。"""
+    """執行結果回覆：文字 + 下載連結（免費方案不支援 type=file）。"""
     if not LINE_TOKEN:
         return
     if not r["ok"]:
@@ -341,11 +339,8 @@ async def reply_result(token: str, r: dict, ok_msg: str, args: list | None = Non
         path = WORK_DIR / Path(fname).name
         if path.is_file():
             import urllib.parse
-            messages.append({
-                "type": "file",
-                "originalContentUrl": public_url(f"/download/{urllib.parse.quote(fname)}"),
-                "fileName": Path(fname).name,
-            })
+            dl_url = public_url(f"/download/{urllib.parse.quote(fname)}")
+            messages.append({"type": "text", "text": f"📎 {Path(fname).name}\n\n下載：{dl_url}"})
     await send_line_message(token, messages)
 
 
