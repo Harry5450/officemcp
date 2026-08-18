@@ -231,11 +231,37 @@ def parse_rule(text: str) -> dict | None:
     if re.search(r"(列出|有哪些|看看|查看|有.*檔案|list|檔案列表)", low) and re.search(r"檔案|文件|files", low, re.IGNORECASE):
         return {"action": "list", "args": []}
 
-    # 加文字到文件
-    m = re.search(r"([a-zA-Z0-9_\-\u4e00-\u9fff]+\.docx)\s*(?:裡|中)?\s*(?:請|幫我|麻煩|幫)?\s*(加|插入|新增|寫入|加入|加上|填)(?:入|上)?\s*(.{1,120}?)\s*$", text)
+    # --- 編輯既有文件 ---
+
+    # 檔名模式：只允許行首或「空白/的/在/裡/中/把/將」之後接檔名，
+    # 避免把「幫我在」這種前置字一起吃進檔名
+    fname_pat = r"(?:^|(?<=[\s的在中裡把將]))([a-zA-Z0-9_\-\u4e00-\u9fff]+\.(?:docx|xlsx|pptx))"
+
+    # 若檔名被「幫我在」等前置字污染，剝掉常見前綴
+    def clean_fname(s: str) -> str:
+        s = re.sub(r"^(幫我|請|麻煩|在|把|將|中的|裡面的)+", "", s)
+        return s
+
+    # 標題/heading：在 X 加入標題 標題文字（放在 add_text 前，避免被吃掉）
+    m = re.search(fname_pat + r"\s*(?:裡|中)?\s*(?:請|幫我|麻煩|可不可以|能不能)?\s*(加|插入|新增|寫入|加入|加上|填|補)(?:入)?\s*(標題|標題列|heading|title)\s*(?::|：)?\s*(.{1,200}?)\s*$", text, re.IGNORECASE)
     if m:
-        fname, content = m.group(1), m.group(3)
-        return {"action": "add_text", "args": ["add", fname, "/", "--type", "paragraph", "--prop", f"text={content}"]}
+        fname, content = m.group(1), m.group(4).strip()
+        return {"action": "add_title", "args": ["add", clean_fname(fname), "/", "--type", "heading", "--prop", f"text={content}"]}
+
+    # 「把 X.docx 內容改成/改為/換成 新內容」→ 修改第一段
+    m = re.search(r"(?:把|將)?\s*" + fname_pat + r"\s*(?:的|裡面的|裡)?\s*(?:內容|文字|文字內容)?\s*(改為|改成|換成|更新成|覆蓋|覆寫|改)\s*(?:成|為)?\s*(.{1,200}?)\s*$", text)
+    if m:
+        fname, content = m.group(1), m.group(3).strip()
+        content = re.sub(r"^(內容是|內容為|說|講|寫)\s*", "", content)
+        return {"action": "replace_text", "args": ["set", clean_fname(fname), "/body/p[1]", "--prop", f"text={content}", "--force"]}
+
+    # 加文字/段落/內容：把 X.docx 加上/加入/寫入 內容；在 X 中加一句...
+    m = re.search(fname_pat + r"\s*(?:裡|中)?\s*(?:請|幫我|麻煩|可不可以|能不能)?\s*(加|插入|新增|寫入|加入|加上|填|補)(?:入|上|一句話|一段話|一句|一段|個段落|一段文字)?\s*(?::|：)?\s*(.{1,200}?)\s*$", text)
+    if m:
+        fname, content = m.group(1), m.group(3).strip()
+        # 若內容含「說/講/寫」當引導詞，吃掉它
+        content = re.sub(r"^(說|講|寫|內容是|內容為|打)\s*", "", content)
+        return {"action": "add_text", "args": ["add", clean_fname(fname), "/", "--type", "paragraph", "--prop", f"text={content}"]}
 
     return None
 
@@ -256,12 +282,14 @@ def gemini_payload(text: str, file_context: list) -> dict:
     sys_prompt = (
         "你是 officecli 指令轉換器。officecli 是操作 Office 文件的 CLI。"
         "使用者的訊息可能是自然語言請求，請判斷使用者想要執行的動作，"
-        "並回覆一個 JSON 物件，格式為 {\"action\": \"create|add_text|merge|command|download|list\", "
+        "並回覆一個 JSON 物件，格式為 {\"action\": \"create|add_text|add_title|replace_text|merge|command|download|list\", "
         "\"args\": [\"officecli 參數陣列\", ...]}。"
         "只回覆 JSON，不要有任何額外文字。"
         "可用動作與對應指令：\n"
         "create: 建立檔案，args 形如 [\"create\", \"檔案.docx\"]\n"
         "add_text: 在文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
+        "add_title: 在文件加入標題，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"heading\", \"--prop\", \"text=標題\"]\n"
+        "replace_text: 修改/覆寫文件內容，args 形如 [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]\n"
         "merge: 合併模板，args 形如 [\"merge\", \"模板.docx\", \"輸出.docx\", \"--data\", \"{\\\"name\\\":\\\"值\\\"}\", \"--force\"]\n"
         "command: 其他 officecli 指令\n"
         "download: 下載檔案，args 形如 [\"檔案.docx\"]\n"
@@ -405,6 +433,12 @@ async def handle_natural_language(token: str, text: str, raw: str):
     elif action == "add_text":
         r = run_officecli(args)
         await reply_result(token, r, "已加入內容", args)
+    elif action == "add_title":
+        r = run_officecli(args)
+        await reply_result(token, r, "已加入標題", args)
+    elif action == "replace_text":
+        r = run_officecli(args)
+        await reply_result(token, r, "已更新內容", args)
     elif action in ("merge", "merge_open"):
         # merge_open 尚未帶 data，提示需要資料
         if action == "merge_open":
