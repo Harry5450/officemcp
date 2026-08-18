@@ -52,10 +52,11 @@
 - 下載連結為 workspace 綁定的 HMAC token，預設有效 1 小時；部署此版本後，舊版未帶 token 的下載 URL 會失效。
 
 ### 3.3 自然語言解析（規則優先 + Zen/Gemini 兜底）
+- 含「建立…Word，包含／包括…」的複合需求會走 create_content：先建立檔案，再寫入標題與欄位，避免只產生空白文件。
 - `parse_rule()` 先跑正規表示式；**規則失敗才呼叫 LLM**（`ask_llm`）。
 - 有 `OPENCODE_ZEN_API_KEY` 時預設先呼叫 OpenCode Zen 的 `chat/completions`；失敗或限流時自動改呼叫 Gemini。
 - 可用 `AI_PROVIDER=gemini` 將順序反轉。兩個 key 都沒有時，才回覆 `/help`。
-- 支援動作：`create` / `create_text` / `add_text` / `add_title` / `replace_text` / `merge` / `merge_open` / `download` / `list` / `templates`；`/cmd` 與任意 `command` 僅限管理員。
+- 支援動作：`create` / `create_content` / `create_text` / `add_text` / `add_title` / `replace_text` / `merge` / `merge_open` / `download` / `list` / `templates`；`/cmd` 與任意 `command` 僅限管理員。
 - 「你要回傳給我」「把剛剛的檔案傳回來」等沒有檔名的後續訊息，會回傳最近建立的 Office 檔案。
 - 建立成功訊息會使用實際檔名，並在同一則 LINE 訊息附上下載連結；不要回退成 `args[0]`（那會是 `create`）。
 - Word 內容任務會先由 `read_docx_content()` 抽取 `word/document.xml` 的段落與表格文字，再交給 Zen／Gemini。
@@ -71,6 +72,7 @@
   - 「在 notes.docx 加一句 你好世界」「notes.docx 幫我加上 這是一段內容」
   - 「幫我在報告.docx 加入標題 季度報告」「把 notes.docx 的內容改成 新的內容」
   - 「幫我建立一個 Excel 檔案叫 客戶名單」
+  - 「幫我建立一份會議紀錄 Word，包含會議主題、日期、出席人員、討論事項與待辦事項」
 - **已知限制**：「把 letter.docx 合併成 out.docx」走 Gemini（merge 規則在 parse_rule 中位置導致）—可接受。
 
 ### 3.4 OfficeCLI 用法（關鍵指令）

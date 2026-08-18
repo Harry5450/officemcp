@@ -453,6 +453,90 @@ def read_docx_content(filename: str, max_chars: int = 12000) -> dict:
 
 # --- 自然語言解析 ---
 
+def parse_create_content(text: str) -> dict | None:
+    """解析「建立文件並包含欄位／內容」的複合需求。
+
+    這類需求不能只回傳 officecli 的 create 指令，否則會建立出空白文件。
+    先用安全的規則抽出檔名、標題與段落，LLM 仍可處理更複雜的自由描述。
+    """
+    import re
+
+    create_m = re.search(r"(建立|新增|創建|製作|產生|生成|做|開|建)", text)
+    if not create_m:
+        return None
+
+    content_m = re.search(
+        r"(包含|包括|內容(?:是|為)?|要有|欄位(?:是|為|有)?|需要(?:有)?)[\s:：]*(.+)$",
+        text[create_m.start():],
+        re.IGNORECASE,
+    )
+    if not content_m:
+        return None
+    marker_start = create_m.start() + content_m.start()
+    marker = content_m.group(1)
+    raw_content = content_m.group(2).strip()
+    if not raw_content:
+        return None
+
+    type_m = re.search(
+        r"(word|excel|powerpoint|簡報|投影片|試算表|表格|文書|文件|docx|xlsx|pptx)",
+        text[create_m.end():marker_start],
+        re.IGNORECASE,
+    )
+    if not type_m:
+        return None
+
+    type_key = type_m.group(1).lower()
+    extensions = {
+        "word": ".docx", "docx": ".docx", "文書": ".docx", "文件": ".docx",
+        "excel": ".xlsx", "xlsx": ".xlsx", "試算表": ".xlsx", "表格": ".xlsx",
+        "powerpoint": ".pptx", "pptx": ".pptx", "簡報": ".pptx", "投影片": ".pptx",
+    }
+    extension = extensions[type_key]
+
+    filename_m = re.search(
+        r"(?:叫|命名為|名為)\s*([a-zA-Z0-9_\-\u4e00-\u9fff]{1,80}(?:\.(?:docx|xlsx|pptx))?)",
+        text,
+        re.IGNORECASE,
+    )
+    filename = filename_m.group(1) if filename_m else ""
+
+    def clean_candidate(value: str) -> str:
+        value = re.sub(r"^(?:一份|一個|一篇|一件|個|份)\s*", "", value.strip())
+        value = re.sub(r"(?:檔案|文件|名稱)\s*$", "", value)
+        value = re.sub(r"[^a-zA-Z0-9_\-\u4e00-\u9fff]", "", value)
+        if value.lower() in {"word", "excel", "powerpoint", "docx", "xlsx", "pptx"}:
+            return ""
+        if value in {"簡報", "投影片", "試算表", "表格", "文書", "文件"}:
+            return ""
+        return value
+
+    if not filename:
+        before_type = text[create_m.end() : create_m.end() + type_m.start()]
+        after_type = text[create_m.end() + type_m.end() : marker_start]
+        filename = clean_candidate(before_type) or clean_candidate(after_type)
+    if not filename:
+        filename = {".docx": "Word", ".xlsx": "Excel", ".pptx": "PowerPoint"}[extension]
+    if not re.search(r"\.\w+$", filename):
+        filename += extension
+
+    raw_content = re.sub(r"[。.!！?？]+$", "", raw_content).strip()
+    if marker.startswith("內容"):
+        sections = [raw_content]
+    else:
+        fields = [
+            part.strip(" \t\r\n、，,；;。")
+            for part in re.split(r"[、,，；;]|\s*(?:以及|和|與)\s*", raw_content)
+        ]
+        fields = [part for part in fields if part and part != "等"]
+        sections = [f"{field}：" for field in fields] or [raw_content]
+
+    return {
+        "action": "create_content",
+        "args": [filename, Path(filename).stem, *sections],
+    }
+
+
 def parse_rule(text: str) -> dict | None:
     """規則式解析：從文字中抽取出 officecli 指令。傳回 None 表示無法解析。"""
     import re
@@ -466,6 +550,11 @@ def parse_rule(text: str) -> dict | None:
         "表格": ".xlsx", "文書": ".docx", "文件": ".docx", "doc": ".docx",
         "word": ".docx", "spreadsheet": ".xlsx",
     }
+    # 複合建立需求要先處理，避免「建立一份會議紀錄 Word，包含...」
+    # 被下面的通用 Word 規則誤判成只建立空白的 Word.docx。
+    content_plan = parse_create_content(text)
+    if content_plan:
+        return content_plan
     # 先找「建立...（類型）...檔名」或「建立...檔名」
     m = re.search(r"(建立|新增|創建|製作|產生|生成|做|開|建)(?:一份|一個|個)?\s*"
                   r"([a-zA-Z0-9_\-\u4e00-\u9fff]{1,80}\.(?:docx|xlsx|pptx))", text)
@@ -576,11 +665,12 @@ def gemini_payload(text: str, file_context: list) -> dict:
     sys_prompt = (
         "你是 officecli 指令轉換器。officecli 是操作 Office 文件的 CLI。"
         "使用者的訊息可能是自然語言請求，請判斷使用者想要執行的動作，"
-        "並回覆一個 JSON 物件，格式為 {\"action\": \"create|add_text|add_title|replace_text|merge|command|download|list|templates\", "
+        "並回覆一個 JSON 物件，格式為 {\"action\": \"create|create_content|add_text|add_title|replace_text|merge|command|download|list|templates\", "
         "\"args\": [\"officecli 參數陣列\", ...]}。"
         "只回覆 JSON，不要有任何額外文字。"
         "可用動作與對應指令：\n"
         "create: 建立檔案，args 形如 [\"create\", \"檔案.docx\"]\n"
+        "create_content: 建立並寫入內容，args 形如 [\"會議紀錄.docx\", \"會議紀錄\", \"會議主題：\", \"日期：\", \"待辦事項：\"]\n"
         "add_text: 在文件加入文字段落，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]\n"
         "add_title: 在文件加入標題，args 形如 [\"add\", \"檔案.docx\", \"/\", \"--type\", \"heading\", \"--prop\", \"text=標題\"]\n"
         "replace_text: 修改/覆寫文件內容，args 形如 [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]\n"
@@ -615,10 +705,11 @@ def zen_payload(text: str, file_context: list) -> dict:
     sys_prompt = (
         "你是 officecli 指令轉換器。officecli 是操作 Office 文件的 CLI。"
         "判斷使用者的自然語言需求，並只回覆 JSON 物件。"
-        "格式為 {\"action\": \"create|add_text|add_title|replace_text|merge|download|list|templates\", "
+        "格式為 {\"action\": \"create|create_content|add_text|add_title|replace_text|merge|download|list|templates\", "
         "\"args\": [\"officecli 參數陣列\", ...]}。"
         "不要回覆 Markdown、解釋或其他文字。"
         "create: [\"create\", \"檔案.docx\"]；"
+        "create_content: 建立並寫入內容，args 為 [\"檔案.docx\", \"標題\", \"段落或欄位1\", \"段落或欄位2\"]；"
         "add_text: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"paragraph\", \"--prop\", \"text=內容\"]；"
         "add_title: [\"add\", \"檔案.docx\", \"/\", \"--type\", \"heading\", \"--prop\", \"text=標題\"]；"
         "replace_text: [\"set\", \"檔案.docx\", \"/body/p[1]\", \"--prop\", \"text=新內容\", \"--force\"]；"
@@ -671,7 +762,7 @@ def parse_llm_plan(output: str) -> dict | None:
         return None
     action = data.get("action")
     args = data.get("args", [])
-    allowed = {"create", "create_text", "add_text", "add_title", "replace_text", "merge", "download", "list", "templates"}
+    allowed = {"create", "create_content", "create_text", "add_text", "add_title", "replace_text", "merge", "download", "list", "templates"}
     if action not in allowed or not isinstance(args, list):
         return None
     return {"action": action, "args": [str(a) for a in args]}
@@ -1045,6 +1136,33 @@ async def handle_natural_language(token: str, text: str, raw: str):
             return
         r = run_officecli(cli_args)
         await reply_result(token, r, f"已建立：{fname}", cli_args)
+    elif action == "create_content":
+        # 複合建立需求的 args 是 [檔名, 標題, 段落...]，避免只建立空白文件。
+        content_args = args[1:] if args and args[0] == "create" else args
+        if not content_args:
+            await reply_line(token, "請提供要建立的檔名與內容。")
+            return
+        fname = Path(str(content_args[0])).name
+        title = str(content_args[1]).strip() if len(content_args) > 1 else Path(fname).stem
+        sections = [str(item).strip() for item in content_args[2:] if str(item).strip()]
+        create_args = ["create", fname]
+        r = run_officecli(create_args)
+        if not r["ok"]:
+            await reply_result(token, r, f"建立失敗：{fname}", create_args)
+            return
+        if title:
+            r = run_officecli([
+                "add", fname, "/", "--type", "heading", "--prop", f"text={title}"
+            ])
+        for section in sections:
+            if not r["ok"]:
+                break
+            r = run_officecli([
+                "add", fname, "/", "--type", "paragraph", "--prop", f"text={section}"
+            ])
+        if r["ok"]:
+            r = run_officecli(["save", fname])
+        await reply_result(token, r, f"已建立並寫入：{fname}", create_args)
     elif action == "create_text":
         fname = Path(args[0]).name
         (active_work_dir() / fname).touch()
