@@ -384,6 +384,19 @@ def latest_office_file() -> str | None:
     return max(files, key=lambda f: f.stat().st_mtime).name
 
 
+def next_office_filename(filename: str) -> str:
+    """同名輸出檔自動加序號，避免未確認就覆蓋既有文件。"""
+    fsafe = Path(filename).name
+    candidate = fsafe
+    stem = Path(fsafe).stem
+    suffix = Path(fsafe).suffix
+    counter = 2
+    while (active_work_dir() / candidate).exists():
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
 def document_for_request(text: str) -> str | None:
     """從訊息找出要處理的 DOCX；沒有明寫檔名時使用最近上傳／建立的 DOCX。"""
     import re
@@ -1142,7 +1155,7 @@ async def handle_natural_language(token: str, text: str, raw: str):
         if not content_args:
             await reply_line(token, "請提供要建立的檔名與內容。")
             return
-        fname = Path(str(content_args[0])).name
+        fname = next_office_filename(str(content_args[0]))
         title = str(content_args[1]).strip() if len(content_args) > 1 else Path(fname).stem
         sections = [str(item).strip() for item in content_args[2:] if str(item).strip()]
         create_args = ["create", fname]

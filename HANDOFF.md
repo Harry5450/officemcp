@@ -53,6 +53,7 @@
 
 ### 3.3 自然語言解析（規則優先 + Zen/Gemini 兜底）
 - 含「建立…Word，包含／包括…」的複合需求會走 create_content：先建立檔案，再寫入標題與欄位，避免只產生空白文件。
+- 複合建立遇到同名檔案會自動加序號（例如 會議紀錄_2.docx），保留原檔，不直接覆蓋。
 - `parse_rule()` 先跑正規表示式；**規則失敗才呼叫 LLM**（`ask_llm`）。
 - 有 `OPENCODE_ZEN_API_KEY` 時預設先呼叫 OpenCode Zen 的 `chat/completions`；失敗或限流時自動改呼叫 Gemini。
 - 可用 `AI_PROVIDER=gemini` 將順序反轉。兩個 key 都沒有時，才回覆 `/help`。
