@@ -18,7 +18,7 @@ import httpx
 PORT = int(os.environ.get("PORT", 8080))
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "Uf8528f219ab515ba80017faad4a8746d")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://mcpoffice.zeabur.app")
