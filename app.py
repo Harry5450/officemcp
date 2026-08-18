@@ -42,6 +42,7 @@ DOWNLOAD_SECRET = os.environ.get("DOWNLOAD_SECRET", "") or LINE_SECRET or "local
 # 每個 webhook request 都有自己的 workspace／LINE 目標，避免多人同時使用時互相污染。
 ACTIVE_WORKSPACE_ID: ContextVar[str] = ContextVar("active_workspace_id", default="legacy")
 ACTIVE_LINE_TARGET: ContextVar[str] = ContextVar("active_line_target", default="")
+ACTIVE_LINE_SOURCE_KIND: ContextVar[str] = ContextVar("active_line_source_kind", default="")
 ACTIVE_IS_ADMIN: ContextVar[bool] = ContextVar("active_is_admin", default=False)
 
 # 記憶型 log（最近 N 條 webhook 事件，供診斷）
@@ -306,9 +307,29 @@ async def send_line_message(token: str, messages: list):
         log_event("reply_error", "LINE_TOKEN 未設定")
         return
     target = ACTIVE_LINE_TARGET.get() or LINE_GROUP_ID or LINE_USER_ID
+    prefer_reply = ACTIVE_LINE_SOURCE_KIND.get() == "user" and bool(token)
     headers = {"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient() as c:
+            if prefer_reply:
+                r = await c.post(
+                    "https://api.line.me/v2/bot/message/reply",
+                    headers=headers,
+                    json={"replyToken": token, "messages": messages},
+                )
+                if r.status_code == 200:
+                    return
+                log_event("reply_error", f"HTTP {r.status_code}: {r.text[:200]}")
+                if not target:
+                    return
+                r = await c.post(
+                    "https://api.line.me/v2/bot/message/push",
+                    headers=headers,
+                    json={"to": target, "messages": messages},
+                )
+                if r.status_code != 200:
+                    log_event("push_error", f"HTTP {r.status_code}: {r.text[:200]}")
+                return
             if target:
                 r = await c.post(
                     "https://api.line.me/v2/bot/message/push",
@@ -1096,13 +1117,15 @@ async def webhook(request: Request):
         uid = src.get("userId")
         workspace_id = workspace_id_for_source(src)
         target = gid or rid or uid or ""
+        source_type = "group" if gid else ("room" if rid else ("user" if uid else "unknown"))
         workspace_token = ACTIVE_WORKSPACE_ID.set(workspace_id)
         target_token = ACTIVE_LINE_TARGET.set(target)
+        source_kind_token = ACTIVE_LINE_SOURCE_KIND.set(source_type)
         admin_token = ACTIVE_IS_ADMIN.set(is_admin_source(src))
-        source_type = "group" if gid else ("room" if rid else ("user" if uid else "unknown"))
         log_event("source", f"workspace={workspace_id} type={source_type}")
         if event.get("type") != "message":
             ACTIVE_LINE_TARGET.reset(target_token)
+            ACTIVE_LINE_SOURCE_KIND.reset(source_kind_token)
             ACTIVE_WORKSPACE_ID.reset(workspace_token)
             ACTIVE_IS_ADMIN.reset(admin_token)
             continue
@@ -1124,12 +1147,14 @@ async def webhook(request: Request):
                 else:
                     await reply_line(token, f"下載檔案失敗：HTTP {r.status_code}")
             ACTIVE_LINE_TARGET.reset(target_token)
+            ACTIVE_LINE_SOURCE_KIND.reset(source_kind_token)
             ACTIVE_WORKSPACE_ID.reset(workspace_token)
             ACTIVE_IS_ADMIN.reset(admin_token)
             continue
 
         if event["message"]["type"] != "text":
             ACTIVE_LINE_TARGET.reset(target_token)
+            ACTIVE_LINE_SOURCE_KIND.reset(source_kind_token)
             ACTIVE_WORKSPACE_ID.reset(workspace_token)
             ACTIVE_IS_ADMIN.reset(admin_token)
             continue
@@ -1195,6 +1220,7 @@ async def webhook(request: Request):
                 pass
         finally:
             ACTIVE_LINE_TARGET.reset(target_token)
+            ACTIVE_LINE_SOURCE_KIND.reset(source_kind_token)
             ACTIVE_WORKSPACE_ID.reset(workspace_token)
             ACTIVE_IS_ADMIN.reset(admin_token)
 
