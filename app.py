@@ -469,18 +469,28 @@ async def test_gemini():
         return {"ok": False, "error": "GEMINI_API_KEY 未設定"}
     results = {}
     async with httpx.AsyncClient(timeout=20) as c:
-        # 方式1: header x-goog-api-key (新版格式)
         r1 = await c.post(gemini_url(), headers=gemini_headers(),
                           json={"contents": [{"parts": [{"text": "hi"}]}]})
         results["header_key"] = {"http": r1.status_code, "ok": r1.status_code == 200,
                                   "msg": (r1.text[:150] if r1.status_code != 200 else "works")}
-        # 方式2: query param key (舊版格式)
         r2 = await c.post(gemini_url() + f"?key={GEMINI_KEY}",
                           headers={"Content-Type": "application/json"},
                           json={"contents": [{"parts": [{"text": "hi"}]}]})
         results["query_key"] = {"http": r2.status_code, "ok": r2.status_code == 200,
                                  "msg": (r2.text[:150] if r2.status_code != 200 else "works")}
-    return {"ok": True, "key_prefix": GEMINI_KEY[:4], "tests": results}
+        # 列出可用 model（grep flash 系列）
+        try:
+            r3 = await c.get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+                             headers=gemini_headers())
+            if r3.status_code == 200:
+                models = [m["name"].replace("models/", "") for m in r3.json().get("models", [])
+                          if "flash" in m["name"] or "pro" in m["name"]]
+                results["models"] = models[:20]
+            else:
+                results["models"] = f"list failed: {r3.status_code} {r3.text[:120]}"
+        except Exception as e:
+            results["models"] = f"list error: {e}"
+    return {"ok": True, "key_prefix": GEMINI_KEY[:4], "current_model": GEMINI_MODEL, "tests": results}
 
 
 @app.get("/line-status")
