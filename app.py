@@ -540,11 +540,12 @@ async def webhook(request: Request):
 
 
 @app.get("/test-push")
-async def test_push():
-    """診斷：直接推一則測試訊息到已記錄的群組/使用者（驗證 push API 通路）。"""
+async def test_push(request: Request):
+    """診斷：直接推一則測試訊息到指定目標（預設群組）。可帶 ?to=userId 指定個人帳號。"""
     if not LINE_TOKEN:
         return {"ok": False, "error": "LINE_TOKEN 未設定"}
-    target = LINE_GROUP_ID or LINE_USER_ID
+    params = request.query_params
+    target = params.get("to") or LINE_GROUP_ID or LINE_USER_ID
     if not target:
         return {"ok": False, "error": "尚未取得 target，請先在 Line 傳一則訊息或把 bot 加入群組"}
     async with httpx.AsyncClient() as c:
@@ -554,7 +555,7 @@ async def test_push():
             json={"to": target, "messages": [{"type": "text", "text": "測試 push 訊息 ✅ 若你看到這則，代表 push API 正常"}]},
         )
     return {"ok": r.status_code == 200, "http": r.status_code, "body": r.text[:300],
-            "to": target, "to_type": "group" if LINE_GROUP_ID else "user"}
+            "to": target, "to_type": "group" if LINE_GROUP_ID else ("user" if params.get("to") else "recorded")}
 
 
 @app.get("/diag-env")
